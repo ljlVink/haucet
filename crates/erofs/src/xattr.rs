@@ -261,3 +261,91 @@ pub fn getxattr(vi: &mut Inode, name: &str, buffer: &mut [u8], hidden: bool) -> 
 pub fn listxattr(_vi: &mut Inode, _buffer: &mut [u8]) -> Result<usize> {
     Err(Error::eopnotsupp())
 }
+
+/// Read inline and shared attributes without losing binary values or long prefixes.
+pub(crate) fn read_all(
+    vi: &mut Inode,
+) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    use anyhow::{Context, ensure};
+    let mut attributes = std::collections::BTreeMap::new();
+    if vi.xattr_isize == 0 {
+        return Ok(attributes);
+    }
+    let filesystem_size = vi
+        .sbi
+        .primarydevice_blocks
+        .checked_mul(vi.sbi.blksiz() as u64)
+        .context("filesystem size overflow")?;
+    erofs_init_inode_xattrs(vi)?;
+    let read_entry = |pos: u64| -> anyhow::Result<(String, Vec<u8>, u64)> {
+        ensure!(
+            pos.checked_add(4).is_some_and(|end| end <= filesystem_size),
+            "xattr header extends beyond filesystem"
+        );
+        let mut header = Vec::new();
+        read_meta_bytes(vi, pos, 4, &mut header)?;
+        let index = header[1];
+        let name_len = header[0] as usize;
+        let value_len = u16::from_le_bytes(header[2..4].try_into()?) as usize;
+        ensure!(
+            pos.checked_add(4 + name_len as u64 + value_len as u64)
+                .is_some_and(|end| end <= filesystem_size),
+            "xattr value extends beyond filesystem"
+        );
+        let mut data = Vec::new();
+        read_meta_bytes(vi, pos + 4, name_len + value_len, &mut data)?;
+        let mut name = Vec::new();
+        if index & EROFS_XATTR_LONG_PREFIX != 0 {
+            let prefix = vi
+                .sbi
+                .xattr_prefixes
+                .get((index & EROFS_XATTR_LONG_PREFIX_MASK) as usize)
+                .context("invalid long xattr prefix")?;
+            name.extend_from_slice(
+                xattr_prefix_for_index(prefix.base_index)
+                    .context("unsupported xattr namespace")?
+                    .as_bytes(),
+            );
+            name.extend_from_slice(&prefix.infix);
+        } else {
+            name.extend_from_slice(
+                xattr_prefix_for_index(index)
+                    .context("unsupported xattr namespace")?
+                    .as_bytes(),
+            );
+        }
+        name.extend_from_slice(&data[..name_len]);
+        let name = String::from_utf8(name).context("xattr name is not UTF-8")?;
+        ensure!(!name.contains('\0'), "xattr name contains NUL");
+        let size = erofs_xattr_entry_size(header[0], value_len as u16) as u64;
+        Ok((name, data[name_len..].to_vec(), size))
+    };
+    let end = vi.iloc() + vi.inode_isize as u64 + vi.xattr_isize as u64;
+    ensure!(
+        end <= filesystem_size,
+        "inode xattrs extend beyond filesystem"
+    );
+    let mut pos = vi.iloc() + vi.inode_isize as u64 + 12 + vi.xattr_shared_count as u64 * 4;
+    ensure!(pos <= end, "xattr header extends beyond inode xattrs");
+    while pos < end {
+        ensure!(end - pos >= 4, "truncated xattr header");
+        let (name, value, size) = read_entry(pos)?;
+        ensure!(size <= end - pos, "xattr extends beyond inode xattrs");
+        if !name.is_empty() {
+            ensure!(
+                attributes.insert(name, value).is_none(),
+                "duplicate inline xattr"
+            );
+        }
+        pos += size;
+    }
+    for id in &vi.xattr_shared_xattrs {
+        let (name, value, _) =
+            read_entry(vi.sbi.pos(vi.sbi.xattr_blkaddr as u64) + *id as u64 * 4)?;
+        ensure!(
+            attributes.insert(name, value).is_none(),
+            "duplicate shared xattr"
+        );
+    }
+    Ok(attributes)
+}

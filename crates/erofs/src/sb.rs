@@ -99,7 +99,7 @@ pub fn check_layout_compatibility(feature: u32) -> Result<()> {
 fn z_erofs_load_lz4_config(sbi: &mut SbInfo, data: Option<&[u8]>) -> Result<()> {
     match data {
         Some(cfg) => {
-            if cfg.len() < 16 {
+            if cfg.len() < 14 {
                 return Err(Error::errno(-libc::EINVAL));
             }
             let distance = get_unaligned_le16(cfg, 0);
@@ -142,19 +142,19 @@ pub fn z_erofs_parse_cfgs(sbi: &mut SbInfo, sb: &[u8]) -> Result<()> {
             match alg {
                 Z_EROFS_COMPRESSION_LZ4 => z_erofs_load_lz4_config(sbi, Some(&data))?,
                 Z_EROFS_COMPRESSION_DEFLATE => {
-                    if data.len() < 8 {
+                    if data.len() < 6 {
                         return Err(Error::errno(-libc::EINVAL));
                     }
                     sbi.deflate_windowbits = Some(data[0]);
                 }
                 Z_EROFS_COMPRESSION_ZSTD => {
-                    if data.len() < 8 {
+                    if data.len() < 6 {
                         return Err(Error::errno(-libc::EINVAL));
                     }
                     sbi.zstd_windowlog = Some(data[1]);
                 }
                 Z_EROFS_COMPRESSION_LZMA => {
-                    if data.len() < 16 {
+                    if data.len() < 14 {
                         return Err(Error::errno(-libc::EINVAL));
                     }
                     sbi.lzma_dict_size = Some(get_unaligned_le32(&data, 0));

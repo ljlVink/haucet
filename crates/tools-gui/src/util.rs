@@ -111,11 +111,6 @@ pub fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(2.0);
 }
 
-pub fn trimmed_non_empty(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
-}
-
 pub fn sibling_output_path(input: &str, fallback_stem: &str, suffix: &str) -> String {
     let path = Path::new(input);
     let stem = path

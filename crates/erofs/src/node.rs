@@ -77,14 +77,17 @@ impl ErofsNode {
 }
 
 pub fn handle_special_symbols(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if matches!(c, '.' | '+' | '[' | ']' | '*') {
-            out.push('\\');
-        }
-        out.push(c);
+    if let Some((path, label)) = s.rsplit_once(' ') {
+        format!(
+            "{} {}",
+            regex::escape(path)
+                .replace(' ', "\\x20")
+                .replace('\t', "\\x09"),
+            label.trim_end_matches('\0')
+        )
+    } else {
+        regex::escape(s)
     }
-    out
 }
 
 pub static OTHER_PATHS_IN_ROOT_DIR: [&str; 1] = ["/lost+found"];
@@ -143,10 +146,10 @@ fn parse_vfs_cap_data(data: &[u8]) -> Option<u64> {
 pub fn create_node(nodes: &mut Vec<ErofsNode>, path: &str, inode: &Inode) -> Result<()> {
     let fs_config = format!(
         "{} {} {} {:04o}",
-        path,
+        shlex::try_quote(path).map_err(|_| Error::errno(-libc::EINVAL))?,
         inode.i_uid,
         inode.i_gid,
-        inode.i_mode & 0o777
+        inode.i_mode & 0o7777
     );
     let mut node = ErofsNode {
         path: path.to_string(),

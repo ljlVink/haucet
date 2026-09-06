@@ -37,9 +37,10 @@ haucet vcom flash COM3 0x80000000 loader.bin
 
 ## Build
 
-EROFS extraction is linked into the Rust binary. Repacking still uses the
-bundled external `bin/mkfs.erofs` (or `mkfs.erofs.exe` on Windows), so keep the
-binary beside this repository so it can locate `bin/`.
+EROFS extraction and repacking are linked into the Rust binary through
+`crates/erofs`. These workflows do not require `bin/mkfs.erofs`, Cygwin, or a
+separate tools directory. The crate also provides standalone `extract-erofs`
+and `mkfs-erofs` binaries.
 
 ```sh
 cargo build --release

@@ -1,14 +1,13 @@
 use anyhow::{Context, Result, ensure};
 use common::formats::{cpio, erofs, ext4, header::check_fmt_full};
 use common::package::UpdateLayout;
-use common::tools::ToolPaths;
 use common::{entropy, fs_util, nvme, oeminfo, package, partition, ramdisk};
 use hisi_vcom::transport::{self, DeviceFilter, SerialVcomDevice};
 use hisi_vcom::vcom;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const WORKER_ENV: &str = "HAUCET_GUI_WORKER";
 
@@ -39,7 +38,6 @@ pub enum JobOp {
         workspace: String,
         output: String,
         allow_grow: bool,
-        tools_dir: Option<String>,
     },
     Ext4Unpack {
         image: String,
@@ -202,10 +200,8 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
             workspace,
             output,
             allow_grow,
-            tools_dir,
         } => {
-            let tools = discover_tools(tools_dir)?;
-            erofs::repack_with_tools(Path::new(workspace), Path::new(output), &tools, *allow_grow)?;
+            erofs::repack(Path::new(workspace), Path::new(output), *allow_grow)?;
             Ok(WorkerResult {
                 ok: true,
                 summary: tr!("worker-erofs-repacked", "output" => output.clone()),
@@ -718,12 +714,4 @@ fn layout_label(layout: UpdateLayout) -> &'static str {
         UpdateLayout::L1 => "L1",
         UpdateLayout::L2 => "L2",
     }
-}
-
-fn discover_tools(tools_dir: &Option<String>) -> Result<ToolPaths> {
-    let explicit = tools_dir
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from);
-    ToolPaths::discover(explicit)
 }

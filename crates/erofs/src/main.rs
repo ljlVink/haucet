@@ -1,5 +1,7 @@
 // The upstream-compatible extractor retains format definitions and helpers for
 // EROFS features that are parsed but not yet exposed by the public API.
+mod build_options;
+mod compression;
 #[allow(dead_code)]
 mod config;
 #[allow(dead_code)]
@@ -16,11 +18,14 @@ mod inode;
 #[allow(dead_code)]
 mod io;
 mod log;
+pub mod metadata;
+mod mkfs;
 mod node;
 #[allow(dead_code)]
 mod platform;
 #[allow(dead_code)]
 mod sb;
+mod verify;
 #[allow(dead_code)]
 mod xattr;
 mod zmap;
@@ -42,9 +47,14 @@ use inode::erofs_mode_to_ftype;
 use node::ErofsNode;
 use sb::SbInfo;
 
+pub use build_options::BuildOptions;
+pub use compression::Compression;
 pub use config::Args as CliArgs;
+pub use mkfs::{BuildReport, build};
+pub use verify::{ImageInventory, image_inventory, verify_image};
 
 pub const VERSION: &str = concat!("extract-erofs ", env!("CARGO_PKG_VERSION"));
+pub const MKFS_VERSION: &str = concat!("mkfs-erofs ", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExtractMode {
@@ -222,6 +232,9 @@ fn write_fs_config_and_selinux_label(
     nodes: &[ErofsNode],
     sbi: &SbInfo,
 ) -> Result<(), ExtractError> {
+    metadata::write_extracted(config, nodes, sbi).map_err(|error| {
+        ExtractError::Initialization(format!("saving EROFS metadata: {error:#}"))
+    })?;
     let config_path = platform::join_host_path(&config.config_dir, &config.image_base_name);
     let fs_config_path = format!("{}_fs_config", config_path);
     let selinux_labels_path = format!("{}_file_contexts", config_path);
@@ -259,7 +272,7 @@ fn write_fs_config_and_selinux_label(
                     other,
                     n.inode.i_uid,
                     n.inode.i_gid,
-                    n.inode.i_mode & 0o777
+                    n.inode.i_mode & 0o7777
                 );
                 let selinux_label =
                     node::handle_special_symbols(&format!("{} {}", other, n.selinux_label));
@@ -267,12 +280,14 @@ fn write_fs_config_and_selinux_label(
                     .map_err(|error| {
                         ExtractError::Initialization(format!("writing {fs_config_path}: {error}"))
                     })?;
-                sel.write_all(format!("{}\n", selinux_label).as_bytes())
-                    .map_err(|error| {
-                        ExtractError::Initialization(format!(
-                            "writing {selinux_labels_path}: {error}"
-                        ))
-                    })?;
+                if !n.selinux_label.is_empty() {
+                    sel.write_all(format!("{}\n", selinux_label).as_bytes())
+                        .map_err(|error| {
+                            ExtractError::Initialization(format!(
+                                "writing {selinux_labels_path}: {error}"
+                            ))
+                        })?;
+                }
             }
         }
     }
@@ -284,6 +299,17 @@ fn write_fs_config_and_selinux_label(
         let build_time = sbi.epoch + sbi.build_time as i64;
         let time_str = ctime_trimmed(build_time);
         let uuid = uuid_unparse_lower(&sbi.uuid);
+        let mut volume = [0; 16];
+        sbi.dev
+            .read_at(&mut volume, EROFS_SUPER_OFFSET + 64)
+            .map_err(|error| {
+                ExtractError::Initialization(format!("reading volume label: {error}"))
+            })?;
+        let label = std::str::from_utf8(&volume)
+            .map_err(|error| {
+                ExtractError::Initialization(format!("invalid volume label: {error}"))
+            })?
+            .trim_end_matches('\0');
         let is_big_pcluster = sbi.feature_incompat & EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER != 0;
         opt.write_all(format!("Filesystem created:    {}\n", time_str).as_bytes())
             .map_err(|error| {
@@ -293,18 +319,30 @@ fn write_fs_config_and_selinux_label(
             .map_err(|error| {
                 ExtractError::Initialization(format!("writing {mkfs_option_path}: {error}"))
             })?;
-        let has_ishare = sbi.feature_compat & EROFS_FEATURE_COMPAT_ISHARE_XATTRS != 0;
+        let quote_path = |value: &str| {
+            let value = if cfg!(windows) {
+                value.replace('\\', "/")
+            } else {
+                value.to_owned()
+            };
+            shlex::try_quote(&value)
+                .map(|value| value.into_owned())
+                .map_err(|error| {
+                    ExtractError::Initialization(format!("quoting mkfs path: {error}"))
+                })
+        };
         opt.write_all(
             format!(
-                "mkfs.erofs options:    -zlz4hc {}-T {} -U {} {}--fs-config-file={} --file-contexts={} {}_repack.img {}\n",
+                "mkfs.erofs options:    -zlz4hc {}-b {} -T {} -U {} -L {} --fs-config-file={} --file-contexts={} {} {}\n",
                 if is_big_pcluster { "-C 16384 " } else { "" },
+                sbi.blksiz(),
                 build_time,
                 uuid,
-                if has_ishare { "--xattr-inode-digest " } else { "" },
-                fs_config_path,
-                selinux_labels_path,
-                config.image_base_name,
-                config.out_dir
+                shlex::try_quote(label).map_err(|error| ExtractError::Initialization(format!("quoting label: {error}")))?,
+                quote_path(&fs_config_path)?,
+                quote_path(&selinux_labels_path)?,
+                quote_path(&format!("{}_repack.img", config.image_base_name))?,
+                quote_path(&config.out_dir)?
             )
             .as_bytes(),
         )

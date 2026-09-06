@@ -1,5 +1,4 @@
-# erofs for rust
+# erofs
 
-LZMA/DEFLATE does not support now.
-
-TODO: add erofs pack
+Embedded Rust EROFS extraction, image building, and verification for Haucet.
+The crate replaces the former `erofs-extract` package.

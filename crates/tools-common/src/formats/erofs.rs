@@ -1,22 +1,21 @@
 use super::hvb::{HvbFooter, HvbWrapper};
 use crate::fs_util;
-use crate::process::{CommandWindow, configure_command_window};
 use crate::tools::ToolPaths;
-use anyhow::{Context, Result, bail, ensure};
-use erofs_extract::{ExtractMode, ExtractOptions};
+use anyhow::{Context, Result, ensure};
+use erofs::{BuildOptions, ExtractOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const EROFS_MAGIC: [u8; 4] = [0xe2, 0xe1, 0xf5, 0xe0];
 const EROFS_MAGIC_OFFSET: u64 = 1024;
 const MANIFEST_NAME: &str = "haucet-erofs.json";
 const MANIFEST_VERSION: u32 = 1;
 const CERTIFICATE_NAME: &str = "hvb-certificate.bin";
+const METADATA_NAME: &str = "erofs-metadata.json";
 const HASH_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +60,7 @@ pub fn unpack(image: &Path, out: &Path, force: bool) -> Result<()> {
     fs_util::prepare_dir_excluding(out, "EROFS workspace", force, &[image])?;
 
     eprintln!("extracting EROFS image {}", image.display());
-    erofs_extract::extract(image, out, ExtractOptions::default())
+    erofs::extract(image, out, ExtractOptions::default())
         .context("embedded EROFS extraction failed")?;
 
     let extracted_source_dir = find_source_dir(out)?;
@@ -112,8 +111,8 @@ pub fn unpack(image: &Path, out: &Path, force: bool) -> Result<()> {
         source_dir: relative_string(out, &source_dir)?,
         config_dir: relative_string(out, &config_dir)?,
         fs_options_file: relative_string(out, &fs_options)?,
-        extract_erofs_version: erofs_extract::VERSION.to_owned(),
-        mkfs_erofs_version: "not queried during unpack".to_owned(),
+        extract_erofs_version: erofs::VERSION.to_owned(),
+        mkfs_erofs_version: erofs::MKFS_VERSION.to_owned(),
         hvb,
     };
     write_manifest(out, &manifest)?;
@@ -121,33 +120,17 @@ pub fn unpack(image: &Path, out: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn repack(workspace: &Path, output: &Path, allow_grow: bool) -> Result<()> {
-    let tools = ToolPaths::discover(None)?;
-    repack_with_tools_window(
-        workspace,
-        output,
-        &tools,
-        allow_grow,
-        CommandWindow::Inherit,
-    )
-}
-
+/// Compatibility entry point; repacking uses the embedded Rust writer.
 pub fn repack_with_tools(
     workspace: &Path,
     output: &Path,
-    tools: &ToolPaths,
+    _tools: &ToolPaths,
     allow_grow: bool,
 ) -> Result<()> {
-    repack_with_tools_window(workspace, output, tools, allow_grow, CommandWindow::Hidden)
+    repack(workspace, output, allow_grow)
 }
 
-fn repack_with_tools_window(
-    workspace: &Path,
-    output: &Path,
-    tools: &ToolPaths,
-    allow_grow: bool,
-    window: CommandWindow,
-) -> Result<()> {
+pub fn repack(workspace: &Path, output: &Path, allow_grow: bool) -> Result<()> {
     let workspace = fs_util::absolute_path(workspace)?;
     let output = fs_util::absolute_path(output)?;
     ensure!(
@@ -191,24 +174,20 @@ fn repack_with_tools_window(
     );
 
     let result = (|| -> Result<()> {
-        let preserved = parse_mkfs_options(&fs_options_path, &config_dir)?;
-        eprintln!("rebuilding {} with mkfs.erofs", manifest.partition);
-        let mut command = Command::new(&tools.mkfs_erofs);
-        command.arg("-d1");
-        // The bundled Windows mkfs.erofs is a Cygwin binary. Native Windows
-        // symbolic links have no Cygwin xattr stream, so asking mkfs to scan
-        // host xattrs fails before the recorded fs_config/file_contexts can
-        // be applied. Those Android metadata files remain the source of
-        // ownership, modes, capabilities, and SELinux labels.
-        if cfg!(windows) {
-            command.arg("-x-1");
+        let mut options = parse_mkfs_options(&fs_options_path, &config_dir)?;
+        let metadata_file = config_dir.join(METADATA_NAME);
+        if metadata_file.is_file() {
+            options.metadata_file = Some(metadata_file);
         }
-        command
-            .args(&preserved)
-            .arg(mkfs_path(&raw_path))
-            .arg(mkfs_path(&source_dir));
-        run_status(&mut command, "mkfs.erofs", window)?;
-        ensure!(is_erofs(&raw_path)?, "mkfs.erofs produced an invalid image");
+        eprintln!(
+            "rebuilding {} with embedded Rust mkfs.erofs",
+            manifest.partition
+        );
+        erofs::build(&source_dir, &raw_path, &options).context("embedded EROFS building failed")?;
+        ensure!(
+            is_erofs(&raw_path)?,
+            "EROFS writer produced an invalid image"
+        );
 
         let raw_size = fs::metadata(&raw_path)?.len();
         if let Some(hvb) = &manifest.hvb {
@@ -245,7 +224,7 @@ fn repack_with_tools_window(
         }
 
         ensure!(is_erofs(&wrapped_path)?, "wrapped output is not EROFS");
-        validate_with_extractor(&wrapped_path, &workspace)?;
+        erofs::verify_image(&wrapped_path).context("embedded EROFS validation failed")?;
         fs::rename(&wrapped_path, &output)
             .with_context(|| format!("moving rebuilt image to {}", output.display()))?;
         Ok(())
@@ -320,16 +299,13 @@ fn normalize_extraction(
 
     for suffix in ["_fs_config", "_file_contexts", "_fs_options"] {
         let old_path = find_file_with_suffix(config_dir, suffix)?;
-        let text = fs::read_to_string(&old_path)
-            .with_context(|| format!("reading extracted metadata {}", old_path.display()))?;
         let new_path = config_dir.join(format!("{partition}{suffix}"));
-        fs::write(&new_path, text.replace(extracted_name, partition))?;
-        fs::remove_file(old_path)?;
+        fs::rename(old_path, new_path)?;
     }
     Ok(normalized_source)
 }
 
-fn parse_mkfs_options(path: &Path, config_dir: &Path) -> Result<Vec<String>> {
+fn parse_mkfs_options(path: &Path, config_dir: &Path) -> Result<BuildOptions> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("reading mkfs options from {}", path.display()))?;
     let line = text
@@ -339,124 +315,49 @@ fn parse_mkfs_options(path: &Path, config_dir: &Path) -> Result<Vec<String>> {
                 .map(|(_, value)| value.trim())
         })
         .context("fs_options does not contain a mkfs.erofs command")?;
-    // extract.erofs historically records unquoted Windows paths.  `shlex`
-    // treats their backslashes as POSIX escape characters, so normalize them
-    // before parsing while preserving the generated command's meaning.
-    let line = if cfg!(windows) {
-        line.replace('\\', "/")
-    } else {
-        line.to_owned()
-    };
-    let mut words = shlex::split(&line).context("invalid shell quoting in mkfs.erofs options")?;
+    let mut words = shlex::split(line).context("invalid shell quoting in mkfs.erofs options")?;
     ensure!(
         words.len() >= 2,
         "mkfs.erofs options are missing output/source paths"
     );
     words.truncate(words.len() - 2);
 
-    let mut output = Vec::new();
-    let mut index = 0;
-    while index < words.len() {
-        let word = &words[index];
-        if let Some(original) = word.strip_prefix("--fs-config-file=") {
-            let basename = Path::new(original)
-                .file_name()
-                .context("invalid fs_config path")?;
-            let path = config_dir.join(basename);
-            ensure!(path.is_file(), "missing fs_config file: {}", path.display());
-            output.push(format!("--fs-config-file={}", mkfs_path(&path)));
-        } else if let Some(original) = word.strip_prefix("--file-contexts=") {
-            let basename = Path::new(original)
-                .file_name()
-                .context("invalid file_contexts path")?;
-            let path = config_dir.join(basename);
+    let mut options =
+        BuildOptions::from_args(&words).context("parsing recorded mkfs.erofs options")?;
+    for (recorded_path, suffix) in [
+        (&mut options.fs_config, "_fs_config"),
+        (&mut options.file_contexts, "_file_contexts"),
+    ] {
+        if let Some(original) = recorded_path {
+            let original = original.to_string_lossy();
+            let basename = original
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .with_context(|| format!("invalid {suffix} path"))?;
+            let original_path =
+                fs_util::is_simple_name(basename).then(|| config_dir.join(basename));
+            let has_windows_drive = original.as_bytes().get(1) == Some(&b':')
+                && original
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphabetic);
             ensure!(
-                path.is_file(),
-                "missing file_contexts file: {}",
-                path.display()
+                original_path.is_some() || has_windows_drive,
+                "invalid {suffix} path"
             );
-            output.push(format!("--file-contexts={}", mkfs_path(&path)));
-        } else if option_with_inline_value(word) || flag_option(word) {
-            output.push(word.clone());
-        } else if matches!(word.as_str(), "-T" | "-U" | "-L") {
-            let value = words
-                .get(index + 1)
-                .with_context(|| format!("{word} is missing its value"))?;
-            output.push(word.clone());
-            output.push(value.clone());
-            index += 1;
-        } else {
-            bail!("unsupported recorded mkfs.erofs option {word:?}")
+            let path = if let Some(original_path) = original_path.filter(|path| path.is_file()) {
+                original_path
+            } else {
+                // Resolve renamed configs and legacy unquoted Windows paths,
+                // whose backslashes shlex interprets as shell escapes.
+                find_file_with_suffix(config_dir, suffix)?
+            };
+            ensure!(path.is_file(), "missing {suffix} file: {}", path.display());
+            *recorded_path = Some(path);
         }
-        index += 1;
     }
-    Ok(output)
-}
-
-fn option_with_inline_value(option: &str) -> bool {
-    ["-z", "-C", "-b", "-d", "-x", "-E"]
-        .iter()
-        .any(|prefix| option.starts_with(prefix) && option.len() > prefix.len())
-        || [
-            "--mount-point=",
-            "--force-uid=",
-            "--force-gid=",
-            "--uid-offset=",
-            "--gid-offset=",
-            "--max-extent-bytes=",
-            "--xattr-prefix=",
-            "--ovlfs-strip=",
-        ]
-        .iter()
-        .any(|prefix| option.starts_with(prefix))
-}
-
-fn flag_option(option: &str) -> bool {
-    matches!(
-        option,
-        "--all-root" | "--ignore-mtime" | "--preserve-mtime" | "--aufs"
-    )
-}
-
-fn mkfs_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    if cfg!(windows) {
-        let path = path.replace('\\', "/");
-        let bytes = path.as_bytes();
-        if bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && bytes[2] == b'/'
-        {
-            format!(
-                "/cygdrive/{}/{}",
-                (bytes[0] as char).to_ascii_lowercase(),
-                &path[3..]
-            )
-        } else {
-            path
-        }
-    } else {
-        path.into_owned()
-    }
-}
-
-fn validate_with_extractor(image: &Path, workspace: &Path) -> Result<()> {
-    let validation = workspace.join(".haucet-validation");
-    if validation.exists() {
-        fs::remove_dir_all(&validation)?;
-    }
-    let result = erofs_extract::extract(
-        image,
-        &validation,
-        ExtractOptions {
-            mode: ExtractMode::ConfigOnly,
-            ..ExtractOptions::default()
-        },
-    )
-    .context("embedded EROFS validation failed");
-    let _ = fs::remove_dir_all(&validation);
-    result
+    Ok(options)
 }
 
 fn copy_raw_partition(source: &Path, destination: &Path, final_size: u64) -> Result<()> {
@@ -469,15 +370,6 @@ fn copy_raw_partition(source: &Path, destination: &Path, final_size: u64) -> Res
     let mut destination = BufWriter::new(destination_file);
     io::copy(&mut source, &mut destination)?;
     destination.flush()?;
-    Ok(())
-}
-
-fn run_status(command: &mut Command, name: &str, window: CommandWindow) -> Result<()> {
-    configure_command_window(command, window);
-    let status = command
-        .status()
-        .with_context(|| format!("running {name}"))?;
-    ensure!(status.success(), "{name} exited with {status}");
     Ok(())
 }
 
@@ -518,9 +410,202 @@ fn relative_string(base: &Path, path: &Path) -> Result<String> {
         .into_owned())
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_image(directory: &Path) -> PathBuf {
+        let source = directory.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(
+            source.join("system-note.txt"),
+            b"original firmware payload\n",
+        )
+        .unwrap();
+        let image = directory.join("system.img");
+        erofs::build(&source, &image, &BuildOptions::default()).unwrap();
+        image
+    }
+
+    #[test]
+    fn repacks_without_external_tools_and_preserves_metadata_and_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let image = fixture_image(temp.path());
+        let original_size = 256 * 1024;
+        OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .unwrap()
+            .set_len(original_size)
+            .unwrap();
+        let workspace = temp.path().join("workspace with spaces");
+        unpack(&image, &workspace, false).unwrap();
+        let manifest = read_manifest(&workspace).unwrap();
+        assert_eq!(manifest.mkfs_erofs_version, erofs::MKFS_VERSION);
+        let source = workspace.join(&manifest.source_dir);
+        let payload = b"edited firmware payload\n";
+        fs::write(source.join("system-note.txt"), payload).unwrap();
+        let config = workspace.join(&manifest.config_dir);
+        assert!(config.join(METADATA_NAME).is_file());
+        fs::write(
+            find_file_with_suffix(&config, "_fs_config").unwrap(),
+            "/ 0 0 0755\n/system-note.txt 123 456 4750\n",
+        )
+        .unwrap();
+        fs::write(
+            find_file_with_suffix(&config, "_file_contexts").unwrap(),
+            "/system-note\\.txt u:object_r:system_file:s0\n",
+        )
+        .unwrap();
+
+        let output = temp.path().join("rebuilt.img");
+        repack(&workspace, &output, false).unwrap();
+        assert_eq!(fs::metadata(&output).unwrap().len(), original_size);
+        let extracted = temp.path().join("checked");
+        unpack(&output, &extracted, false).unwrap();
+        let rebuilt = read_manifest(&extracted).unwrap();
+        assert_eq!(
+            fs::read(extracted.join(&rebuilt.source_dir).join("system-note.txt")).unwrap(),
+            payload
+        );
+        let rebuilt_config = extracted.join(&rebuilt.config_dir);
+        let fs_config =
+            fs::read_to_string(find_file_with_suffix(&rebuilt_config, "_fs_config").unwrap())
+                .unwrap();
+        assert!(
+            fs_config
+                .lines()
+                .any(|line| line == "/system-note.txt 123 456 4750")
+        );
+        let contexts =
+            fs::read_to_string(find_file_with_suffix(&rebuilt_config, "_file_contexts").unwrap())
+                .unwrap();
+        assert!(contexts.contains("u:object_r:system_file:s0"));
+    }
+
+    #[test]
+    fn repack_preserves_hvb_certificate_and_metadata_paths_after_normalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = fixture_image(temp.path());
+        let mut certificate = vec![0_u8; 240];
+        certificate[..4].copy_from_slice(b"HVB\0");
+        certificate[64..70].copy_from_slice(b"vendor");
+        let wrapper = HvbWrapper {
+            footer: HvbFooter {
+                cert_offset: 128 * 1024,
+                cert_size: certificate.len() as u64,
+                image_size: fs::metadata(&raw).unwrap().len(),
+                partition_size: 256 * 1024,
+            },
+            certificate,
+        };
+        let wrapped_dir = temp.path().join("wrapped");
+        fs::create_dir(&wrapped_dir).unwrap();
+        let image = wrapped_dir.join("system.img");
+        wrapper.write_repacked(&raw, &image).unwrap();
+        let workspace = temp.path().join("work");
+        unpack(&image, &workspace, false).unwrap();
+        let manifest = read_manifest(&workspace).unwrap();
+        assert_eq!(manifest.source_dir, "vendor");
+        let metadata = fs::read_to_string(workspace.join("config").join(METADATA_NAME)).unwrap();
+        assert!(metadata.contains("system-note.txt"));
+        let fs_config = fs::read_to_string(workspace.join("config/vendor_fs_config")).unwrap();
+        assert!(fs_config.contains("/system-note.txt "));
+        assert!(!fs_config.contains("/vendor-note.txt "));
+        let output = temp.path().join("rebuilt.img");
+        repack(&workspace, &output, true).unwrap();
+        let rebuilt = HvbWrapper::read_from(&output).unwrap().unwrap();
+        assert_eq!(rebuilt.certificate, wrapper.certificate);
+        assert_eq!(rebuilt.footer.cert_offset, wrapper.footer.cert_offset);
+        assert_eq!(rebuilt.footer.partition_size, wrapper.footer.partition_size);
+        assert_eq!(
+            fs::metadata(&output).unwrap().len(),
+            wrapper.footer.partition_size
+        );
+    }
+
+    #[test]
+    fn rejected_growth_leaves_no_output_and_can_be_explicitly_allowed() {
+        let temp = tempfile::tempdir().unwrap();
+        let image = fixture_image(temp.path());
+        let workspace = temp.path().join("work");
+        unpack(&image, &workspace, false).unwrap();
+        let mut manifest = read_manifest(&workspace).unwrap();
+        manifest.original_size = 1;
+        write_manifest(&workspace, &manifest).unwrap();
+        let output = temp.path().join("rebuilt.img");
+        let error = repack(&workspace, &output, false).unwrap_err();
+        assert!(format!("{error:#}").contains("larger than original size"));
+        assert!(!output.exists());
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.contains("raw-erofs") && !name.contains("wrapped")
+        }));
+        repack(&workspace, &output, true).unwrap();
+        assert!(fs::metadata(&output).unwrap().len() > manifest.original_size);
+    }
+
+    #[test]
+    fn parses_split_cluster_size_and_quoted_relocated_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("config with spaces");
+        fs::create_dir(&config_dir).unwrap();
+        fs::write(config_dir.join("system_fs_config"), []).unwrap();
+        fs::write(config_dir.join("system_file_contexts"), []).unwrap();
+        let options = temp.path().join("system_fs_options");
+        fs::write(
+            &options,
+            "mkfs.erofs options: -zlz4hc -C 16384 --fs-config-file '/old work/config/system_fs_config' --file-contexts='/old work/config/system_file_contexts' 'new system.img' '/old work/system'\n",
+        )
+        .unwrap();
+        let parsed = parse_mkfs_options(&options, &config_dir).unwrap();
+        assert_eq!(parsed.cluster_size, 16384);
+        assert_eq!(parsed.compression, erofs::Compression::Lz4Hc { level: 9 });
+        assert_eq!(parsed.fs_config, Some(config_dir.join("system_fs_config")));
+        assert_eq!(
+            parsed.file_contexts,
+            Some(config_dir.join("system_file_contexts"))
+        );
+    }
+
+    #[test]
+    fn refuses_unsupported_recorded_options() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = temp.path().join("system_fs_options");
+        fs::write(
+            &options,
+            "mkfs.erofs options: --not-a-real-option out.img source\n",
+        )
+        .unwrap();
+        assert!(parse_mkfs_options(&options, temp.path()).is_err());
+    }
+
+    #[test]
+    fn preserves_quoted_backslashes_in_volume_labels() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = temp.path().join("system_fs_options");
+        fs::write(
+            &options,
+            "mkfs.erofs options: -L 'stock\\image' out.img source\n",
+        )
+        .unwrap();
+        let parsed = parse_mkfs_options(&options, temp.path()).unwrap();
+        assert_eq!(parsed.volume_label, "stock\\image");
+    }
+
+    #[test]
+    fn preserves_option_like_volume_labels() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = temp.path().join("system_fs_options");
+        fs::write(
+            &options,
+            "mkfs.erofs options: -L '--file-contexts' out.img source\n",
+        )
+        .unwrap();
+        let parsed = parse_mkfs_options(&options, temp.path()).unwrap();
+        assert_eq!(parsed.volume_label, "--file-contexts");
+        assert!(parsed.file_contexts.is_none());
+    }
 
     #[test]
     fn parses_unquoted_windows_paths_from_fs_options() {
@@ -537,13 +622,10 @@ mod tests {
         .unwrap();
 
         let parsed = parse_mkfs_options(&options, &config_dir).unwrap();
-        assert!(parsed.contains(&format!(
-            "--fs-config-file={}",
-            mkfs_path(&config_dir.join("system_fs_config"))
-        )));
-        assert!(parsed.contains(&format!(
-            "--file-contexts={}",
-            mkfs_path(&config_dir.join("system_file_contexts"))
-        )));
+        assert_eq!(parsed.fs_config, Some(config_dir.join("system_fs_config")));
+        assert_eq!(
+            parsed.file_contexts,
+            Some(config_dir.join("system_file_contexts"))
+        );
     }
 }

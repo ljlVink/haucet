@@ -16,13 +16,17 @@ Haucet. It is not a substitute for the referenced license texts.
   upstream code is available under MIT or Apache-2.0. The fork as distributed
   here is GPL-3.0-only; the upstream MIT notice is retained in
   `LICENSES/MIT-fastboot-rs.txt`.
-- `crates/erofs-extract` is the in-process Rust EROFS extraction
-  implementation. Its filesystem-format behavior and extraction workflow are
+- `crates/erofs` contains the in-process Rust EROFS extraction and image-building
+  implementations, including the standalone `extract-erofs` and `mkfs-erofs`
+  binaries. Its filesystem-format behavior and extraction/repacking workflows are
   a Rust port informed by [sekaiacg/erofs-tools](https://github.com/sekaiacg/erofs-tools)
-  and upstream [erofs-utils](https://github.com/erofs/erofs-utils). Those
-  upstream projects are GPL-2.0; their license text is retained in
-  `LICENSES/GPL-2.0.txt`. The separately bundled `mkfs.erofs` remains the
-  erofs-utils-compatible external repacking tool.
+  and upstream [erofs-utils](https://github.com/erofs/erofs-utils). Upstream
+  notices are retained with the adapted code, including erofs-utils components
+  offered under GPL-2.0-or-later or MIT. The GPL-2.0 license text is retained in
+  `LICENSES/GPL-2.0.txt`; the MIT text and format-definition notices are in
+  `LICENSES/MIT-erofs-utils.txt`. Legacy erofs-utils binaries and their Cygwin runtime in
+  `bin/`, when distributed, retain their upstream licenses; the Rust workflows
+  no longer execute those binaries.
 - `crates/ext4-extract` provides in-process Rust ext2/ext4 extraction. Filesystem parsing
   uses [ext4-view](https://github.com/nicholasbishop/ext4-view-rs), licensed
   under MIT or Apache-2.0, for file extraction and

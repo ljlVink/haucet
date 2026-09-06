@@ -2,8 +2,7 @@ use crate::app::HaucetApp;
 use crate::pages::images::ImageKind;
 use crate::pages::{ResultView, run_button};
 use crate::util::{
-    human_size, message_box, open_in_file_manager, sibling_output_path, trimmed_non_empty,
-    update_derived_path,
+    human_size, message_box, open_in_file_manager, sibling_output_path, update_derived_path,
 };
 use common::formats::erofs::ErofsManifest;
 use eframe::egui;
@@ -45,7 +44,6 @@ pub struct RepackState {
     pub workspace: String,
     pub output: String,
     pub allow_grow: bool,
-    pub tools_dir: String,
     pub manifest: Option<ErofsManifest>,
     pub manifest_error: Option<String>,
     pub manifest_from: String,
@@ -318,7 +316,6 @@ impl ErofsPage {
                 workspace: self.repack.workspace.trim().to_owned(),
                 output,
                 allow_grow: self.repack.allow_grow,
-                tools_dir: trimmed_non_empty(&self.repack.tools_dir),
             });
         }
     }

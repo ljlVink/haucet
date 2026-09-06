@@ -13,12 +13,15 @@ path = "src/main.rs"
 name = "extract-erofs"
 path = "src/bin/extract-erofs.rs"
 
+[[bin]]
+name = "mkfs-erofs"
+path = "src/bin/mkfs-erofs.rs"
+
 [dependencies]
 anyhow.workspace = true
 crc32c.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-lz4.workspace = true
 regex = "1"
 shlex.workspace = true
 libc.workspace = true
@@ -29,6 +32,9 @@ clap.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+xattr = "1"
 
 [dev-dependencies]
 tempfile = "3"

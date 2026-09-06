@@ -106,6 +106,10 @@ pub(crate) fn create_symlink(
     extraction_root: &str,
 ) -> io::Result<()> {
     let host_target = if target.starts_with('/') {
+        let extraction_root = std::path::absolute(extraction_root)?;
+        let extraction_root = extraction_root.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "extraction root is not UTF-8")
+        })?;
         super::join_image_path(extraction_root, target).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
