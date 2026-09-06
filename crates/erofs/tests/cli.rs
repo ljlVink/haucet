@@ -14,5 +14,5 @@ fn help_exits_successfully() {
 fn version_exits_successfully() {
     let output = extractor().arg("--version").output().unwrap();
     assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains(erofs_extract::VERSION));
+    assert!(String::from_utf8_lossy(&output.stdout).contains(erofs::VERSION));
 }

@@ -1,5 +1,5 @@
 use clap::Parser;
-use erofs_extract::{CliArgs, run_cli_args};
+use erofs::{CliArgs, run_cli_args};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

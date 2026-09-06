@@ -10,7 +10,7 @@ anyhow.workspace = true
 bzip2.workspace = true
 bytemuck.workspace = true
 crc32c.workspace = true
-erofs-extract = { path = "../erofs-extract" }
+erofs = { path = "../erofs" }
 ext4-extract = { path = "../ext4-extract" }
 flate2.workspace = true
 fs2.workspace = true

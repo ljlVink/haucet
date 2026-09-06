@@ -5,7 +5,7 @@ members = [
     "crates/tools-gui",
     "crates/hm-fastboot",
     "crates/hisi-vcom",
-    "crates/erofs-extract",
+    "crates/erofs",
     "crates/ext4-extract",
     "crates/online-fetcher"
 ]
