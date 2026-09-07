@@ -39,6 +39,8 @@ Haucet. It is not a substitute for the referenced license texts.
   and HVB behavior was adapted from
   [OpenHarmony startup_hvb](https://gitcode.com/openharmony/startup_hvb), both
   under Apache-2.0. See `LICENSES/Apache-2.0.txt`.
+- Huawei `UPDATE.APP` format behavior in `crates/tools-common/src/splituapp.rs`
+  references [SuperR's splituapp](https://github.com/superr/splituapp)
 - Ramdisk behavior is based on
   [ljlVink/ramdisk-tools](https://github.com/ljlVink/ramdisk-tools), with
   patch-layout reference to [Magisk](https://github.com/topjohnwu/Magisk).

@@ -13,6 +13,6 @@ proc.txt
 test
 haucet
 haucet*.exe
-loader/
+loader*
 *.bat
 *.pdf

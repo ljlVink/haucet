@@ -511,4 +511,3 @@ fn host_xattrs(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     let _ = (path, &mut attributes);
     Ok(attributes)
 }
-
