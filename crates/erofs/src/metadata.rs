@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 #[cfg(not(unix))]
 use std::time::UNIX_EPOCH;
@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::build_options::BuildOptions;
 use crate::inode::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
-
-pub const METADATA_FILE: &str = "erofs-metadata.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntryMetadata {
@@ -87,23 +85,6 @@ pub(crate) fn from_nodes(
         extraction_root: None,
         entries,
     })
-}
-
-pub(crate) fn write_extracted(
-    config: &crate::config::Config,
-    nodes: &[crate::node::ErofsNode],
-    sbi: &crate::sb::SbInfo,
-) -> Result<()> {
-    let mut metadata = from_nodes(nodes, sbi)?;
-    metadata.extraction_root = Some(std::path::absolute(&config.out_dir)?);
-    let path = Path::new(&config.config_dir).join(METADATA_FILE);
-    let mut writer = BufWriter::new(
-        File::create(&path).with_context(|| format!("creating {}", path.display()))?,
-    );
-    serde_json::to_writer_pretty(&mut writer, &metadata)?;
-    writer.write_all(b"\n")?;
-    writer.flush()?;
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -308,9 +289,10 @@ impl MetadataResolver {
                         existing[..length] == *context.label.as_bytes()
                     })
                 {
-                    let mut value = context.label.as_bytes().to_vec();
-                    value.push(0);
-                    entry.xattrs.insert("security.selinux".to_owned(), value);
+                    entry.xattrs.insert(
+                        "security.selinux".to_owned(),
+                        context.label.as_bytes().to_vec(),
+                    );
                 }
                 break;
             }
@@ -571,7 +553,7 @@ mod tests {
         );
         assert_eq!(
             resolved.xattrs["security.selinux"],
-            b"u:object_r:system_file:s0\0"
+            b"u:object_r:system_file:s0"
         );
     }
 
@@ -589,7 +571,7 @@ mod tests {
         fs::write(&file, b"data").unwrap();
         let contexts = temp.path().join("file_contexts");
         fs::write(&contexts, "/file u:object_r:system_file:s0\n").unwrap();
-        let metadata_file = temp.path().join(METADATA_FILE);
+        let metadata_file = temp.path().join("metadata.json");
         for label in [
             b"u:object_r:system_file:s0".to_vec(),
             b"u:object_r:system_file:s0\0".to_vec(),

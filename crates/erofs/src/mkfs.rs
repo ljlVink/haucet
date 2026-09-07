@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 
 use crate::build_options::BuildOptions;
-use crate::compression::{Compression, compress_file};
+use crate::compression::{Compression, compress_file, relocate_indexes};
 use crate::erofs_fs::*;
 use crate::inode::*;
 use crate::metadata::{EntryMetadata, MetadataResolver};
@@ -50,7 +50,7 @@ struct Entry {
 impl Entry {
     fn body_size(&self) -> u64 {
         let header = (self.inode_size + self.xattrs.len()) as u64;
-        if self.layout == EROFS_INODE_COMPRESSED_FULL {
+        if erofs_inode_is_data_compressed(self.layout) {
             round_up(header, 8) + self.compression.len() as u64
         } else {
             header + self.inline.len() as u64
@@ -537,8 +537,9 @@ fn write_filesystem(
 ) -> Result<BuildReport> {
     let block_size = u64::from(options.block_size);
     let initial_size = round_up(EROFS_SUPER_OFFSET + 128 + 18, block_size).max(4096);
-    image.set_len(initial_size)?;
-    image.seek(SeekFrom::Start(initial_size))?;
+    write_zeros(image, initial_size)?;
+    let mut staged = tempfile::tempfile().context("create EROFS data staging file")?;
+    write_zeros(&mut staged, initial_size)?;
     let mut report = BuildReport::default();
     for entry in entries.iter_mut().filter(|e| e.alias.is_none()) {
         report.inode_count += 1;
@@ -552,9 +553,9 @@ fn write_filesystem(
                 .uncompressed_bytes
                 .checked_add(entry.size)
                 .context("filesystem size overflow")?;
-            write_regular(image, entry, options)
+            write_regular(&mut staged, entry, options)
                 .with_context(|| format!("write file {}", entry.path))?;
-            if entry.layout == EROFS_INODE_COMPRESSED_FULL {
+            if erofs_inode_is_data_compressed(entry.layout) {
                 report.compressed_files += 1;
             }
         } else if s_islnk(entry.metadata.mode) {
@@ -570,50 +571,79 @@ fn write_filesystem(
                 "symlink target contains NUL: {}",
                 entry.path
             );
-            write_flat_bytes(image, entry, &target, options.block_size)?;
+            write_flat_bytes(&mut staged, entry, &target, options.block_size)?;
         } else {
             entry.data_union = entry.metadata.rdev;
         }
     }
 
-    // Data addresses are final before assigning metadata slots. Directory data
-    // follows the reserved inode area, so references can be encoded in one pass.
+    // Compression determines inode sizes. Stage data once, then place metadata
+    // before the payload and relocate only physical addresses, not block counts.
+    let stage_bytes = staged.stream_position()? - initial_size;
+    let metadata_start = initial_size;
+    let metadata_block = 0;
+    let offset = assign_inode_slots(entries, block_size)?;
     let xattr_block = if shared_xattrs.is_empty() {
         0
     } else {
-        let address = block_address(image.stream_position()?, options.block_size)?;
+        block_address(
+            metadata_start + round_up(offset, block_size),
+            options.block_size,
+        )?
+    };
+    let data_start = round_up(
+        metadata_start
+            + round_up(offset, block_size)
+            + if shared_xattrs.is_empty() {
+                0
+            } else {
+                round_up(shared_xattrs.len() as u64, block_size)
+            },
+        block_size,
+    );
+    let data_shift = u32::try_from((data_start - initial_size) / block_size)
+        .context("EROFS data address overflow")?;
+    for entry in entries.iter_mut().filter(|e| e.alias.is_none()) {
+        entry.nid += metadata_start >> EROFS_ISLOTBITS;
+        if erofs_inode_is_data_compressed(entry.layout) {
+            relocate_indexes(
+                &mut entry.compression,
+                entry.inode_size + entry.xattrs.len(),
+                usize::try_from(entry.size.div_ceil(block_size))
+                    .context("too many EROFS indexes")?,
+                entry.layout == EROFS_INODE_COMPRESSED_COMPACT,
+                data_shift,
+            )?;
+        } else if (s_isreg(entry.metadata.mode) || s_islnk(entry.metadata.mode))
+            && entry.data_union != u32::MAX
+        {
+            entry.data_union = entry
+                .data_union
+                .checked_add(data_shift)
+                .context("EROFS data address overflow")?;
+        }
+    }
+    write_zeros(image, data_start - metadata_start)?;
+    if !shared_xattrs.is_empty() {
+        image.seek(SeekFrom::Start(
+            metadata_start + round_up(offset, block_size),
+        ))?;
         image.write_all(shared_xattrs)?;
         pad_block(image, options.block_size)?;
-        address
-    };
-    let metadata_start = image.stream_position()?;
-    ensure!(
-        metadata_start.is_multiple_of(block_size),
-        "unaligned EROFS data end"
-    );
-    let metadata_block = block_address(metadata_start, options.block_size)?;
-    let mut offset = 0u64;
-    for entry in entries.iter_mut().filter(|e| e.alias.is_none()) {
-        offset = round_up(offset, EROFS_SLOTSIZE as u64);
-        let size = entry.body_size();
-        if entry.layout == EROFS_INODE_FLAT_INLINE && offset % block_size + size > block_size {
-            offset = round_up(offset, block_size);
-        }
-        entry.nid = offset >> EROFS_ISLOTBITS;
-        offset = offset
-            .checked_add(size)
-            .context("inode metadata size overflow")?;
     }
+    image.seek(SeekFrom::Start(data_start))?;
+    staged.seek(SeekFrom::Start(initial_size))?;
+    io::copy(&mut staged.take(stage_bytes), image).context("copy staged EROFS data")?;
+    let data_end = image.stream_position()?;
+    ensure!(
+        data_end == data_start + stage_bytes,
+        "staged EROFS data length changed"
+    );
     for index in 0..entries.len() {
         if let Some(alias) = entries[index].alias {
             entries[index].nid = entries[alias].nid;
         }
     }
-    let directory_start = metadata_start
-        .checked_add(round_up(offset, block_size))
-        .context("filesystem size overflow")?;
-    image.set_len(directory_start)?;
-    image.seek(SeekFrom::Start(directory_start))?;
     for index in 0..entries.len() {
         if !s_isdir(entries[index].metadata.mode) {
             continue;
@@ -628,7 +658,7 @@ fn write_filesystem(
         .enumerate()
         .filter(|(_, e)| e.alias.is_none())
     {
-        let inode_offset = metadata_start + (entry.nid << EROFS_ISLOTBITS);
+        let inode_offset = entry.nid << EROFS_ISLOTBITS;
         image.seek(SeekFrom::Start(inode_offset))?;
         let inode = encode_inode(
             entry,
@@ -637,7 +667,7 @@ fn write_filesystem(
         )?;
         image.write_all(&inode)?;
         image.write_all(&entry.xattrs)?;
-        if entry.layout == EROFS_INODE_COMPRESSED_FULL {
+        if erofs_inode_is_data_compressed(entry.layout) {
             let padding = (round_up(
                 inode_offset + inode.len() as u64 + entry.xattrs.len() as u64,
                 8,
@@ -657,16 +687,54 @@ fn write_filesystem(
         xattr_block,
         blocks,
     )?;
-    image.set_len(image_bytes)?;
+    ensure!(
+        image.metadata()?.len() == image_bytes,
+        "EROFS output length does not match its encoded block count"
+    );
     report.image_bytes = image_bytes;
     Ok(report)
+}
+
+fn assign_inode_slots(entries: &mut [Entry], block_size: u64) -> Result<u64> {
+    let mut end = 0u64;
+    let mut gaps = BTreeMap::<u64, Vec<u64>>::new();
+    for entry in entries.iter_mut().filter(|e| e.alias.is_none()) {
+        let size = round_up(entry.body_size(), EROFS_SLOTSIZE as u64);
+        let gap = gaps.range(size..).next().map(|(&length, _)| length);
+        let offset = if let Some(length) = gap {
+            let positions = gaps.get_mut(&length).unwrap();
+            let offset = positions.pop().unwrap();
+            if positions.is_empty() {
+                gaps.remove(&length);
+            }
+            if length > size {
+                gaps.entry(length - size).or_default().push(offset + size);
+            }
+            offset
+        } else {
+            // Inline tails cannot cross a block. Reuse the skipped slots for later
+            // inodes instead of permanently padding every partially occupied block.
+            if entry.layout == EROFS_INODE_FLAT_INLINE && end % block_size + size > block_size {
+                let next = round_up(end, block_size);
+                gaps.entry(next - end).or_default().push(end);
+                end = next;
+            }
+            let offset = end;
+            end = end
+                .checked_add(size)
+                .context("inode metadata size overflow")?;
+            offset
+        };
+        entry.nid = offset >> EROFS_ISLOTBITS;
+    }
+    Ok(end)
 }
 
 fn write_regular(image: &mut File, entry: &mut Entry, options: &BuildOptions) -> Result<()> {
     let mut input = BufReader::with_capacity(256 * 1024, File::open(&entry.host)?);
     let start = image.stream_position()?;
     if entry.size > options.block_size as u64 && options.compression != Compression::None {
-        let compressed = compress_file(
+        let mut compressed = compress_file(
             &mut input,
             image,
             options.block_size,
@@ -677,6 +745,10 @@ fn write_regular(image: &mut File, entry: &mut Entry, options: &BuildOptions) ->
             compressed.original_size == entry.size,
             "source file changed size while building"
         );
+        if compressed.used_compression && options.compact_indexes {
+            compressed
+                .compact_indexes(entry.inode_size + entry.xattrs.len(), options.block_size)?;
+        }
         let flat_size = round_up(
             entry.size - entry.inline.len() as u64,
             options.block_size as u64,
@@ -684,13 +756,18 @@ fn write_regular(image: &mut File, entry: &mut Entry, options: &BuildOptions) ->
         if compressed.used_compression
             && compressed.physical_size + (compressed.metadata.len() as u64) < flat_size
         {
-            entry.layout = EROFS_INODE_COMPRESSED_FULL;
+            entry.layout = if options.compact_indexes {
+                EROFS_INODE_COMPRESSED_COMPACT
+            } else {
+                EROFS_INODE_COMPRESSED_FULL
+            };
             entry.data_union = compressed.compressed_blocks;
             entry.inline.clear();
             entry.compression = compressed.metadata;
             return Ok(());
         }
-        image.set_len(start)?;
+        // Rewind and overwrite the candidate without truncating the image. On Windows,
+        // scanners can map the growing output and make SetEndOfFile fail with error 1224.
         image.seek(SeekFrom::Start(start))?;
         input.seek(SeekFrom::Start(0))?;
     }
@@ -742,6 +819,16 @@ fn pad_block(image: &mut File, block_size: u32) -> Result<()> {
     let position = image.stream_position()?;
     let padding = (round_up(position, block_size as u64) - position) as usize;
     image.write_all(&[0u8; 4096][..padding])?;
+    Ok(())
+}
+
+fn write_zeros(image: &mut File, mut length: u64) -> Result<()> {
+    static ZEROES: [u8; 64 * 1024] = [0; 64 * 1024];
+    while length != 0 {
+        let count = length.min(ZEROES.len() as u64) as usize;
+        image.write_all(&ZEROES[..count])?;
+        length -= count as u64;
+    }
     Ok(())
 }
 
@@ -848,7 +935,7 @@ fn write_superblock(
     sb[64..64 + options.volume_label.len()].copy_from_slice(options.volume_label.as_bytes());
     if entries
         .iter()
-        .any(|entry| entry.layout == EROFS_INODE_COMPRESSED_FULL)
+        .any(|entry| erofs_inode_is_data_compressed(entry.layout))
     {
         let big_clusters = options.cluster_size > options.block_size;
         put32(
@@ -912,6 +999,54 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    struct ReadOnlyMapping {
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        view: windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS,
+    }
+
+    #[cfg(windows)]
+    impl ReadOnlyMapping {
+        fn new(file: &File) -> Self {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::Memory::{
+                CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
+            };
+
+            // SAFETY: the file handle remains open for the lifetime of this mapping.
+            let handle = unsafe {
+                CreateFileMappingW(
+                    file.as_raw_handle(),
+                    std::ptr::null(),
+                    PAGE_READONLY,
+                    0,
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            assert!(!handle.is_null(), "{}", io::Error::last_os_error());
+            // SAFETY: handle is a valid read-only file mapping object.
+            let view = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, 0) };
+            if view.Value.is_null() {
+                // SAFETY: handle was created successfully and is not used afterward.
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+                panic!("{}", io::Error::last_os_error());
+            }
+            Self { handle, view }
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ReadOnlyMapping {
+        fn drop(&mut self) {
+            // SAFETY: both resources are valid and released exactly once here.
+            unsafe {
+                windows_sys::Win32::System::Memory::UnmapViewOfFile(self.view);
+                windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
 
     fn read_image(path: &Path) -> Arc<crate::sb::SbInfo> {
         Arc::new(
@@ -977,7 +1112,9 @@ mod tests {
 
     #[test]
     fn compressed_images_roundtrip_and_fall_back_for_noise() {
-        for cluster_size in [4096, 16384] {
+        for (cluster_size, compact_indexes) in
+            [(4096, false), (4096, true), (16384, false), (16384, true)]
+        {
             let temporary = TempDir::new().unwrap();
             let source = temporary.path().join("source");
             fs::create_dir(&source).unwrap();
@@ -996,6 +1133,7 @@ mod tests {
             let output = temporary.path().join("image.erofs");
             let options = BuildOptions {
                 cluster_size,
+                compact_indexes,
                 timestamp: Some(0),
                 ..BuildOptions::default()
             };
@@ -1003,10 +1141,139 @@ mod tests {
             assert_eq!(report.compressed_files, 1);
             let image = read_image(&output);
             let (inode, read) = read_file(&image, "/compressible");
-            assert_eq!(inode.datalayout, EROFS_INODE_COMPRESSED_FULL);
+            assert_eq!(
+                inode.datalayout,
+                if compact_indexes {
+                    EROFS_INODE_COMPRESSED_COMPACT
+                } else {
+                    EROFS_INODE_COMPRESSED_FULL
+                }
+            );
             assert_eq!(read, data);
             assert_eq!(read_file(&image, "/noise").1, noise);
         }
+    }
+
+    #[test]
+    fn inline_inode_gaps_are_reused_without_overlapping_data() {
+        let temporary = TempDir::new().unwrap();
+        let source = temporary.path().join("source");
+        fs::create_dir(&source).unwrap();
+        for number in 0..10 {
+            fs::write(source.join(format!("a-{number}")), vec![number; 2600]).unwrap();
+            fs::write(source.join(format!("z-{number}")), vec![number; 1000]).unwrap();
+        }
+        let output = temporary.path().join("image.erofs");
+        let report = build(
+            &source,
+            &output,
+            &BuildOptions {
+                compression: Compression::None,
+                timestamp: Some(0),
+                ..BuildOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(report.image_bytes <= 12 * 4096);
+        crate::verify_image(&output).unwrap();
+        let image = read_image(&output);
+        assert_eq!(image.meta_blkaddr, 0);
+        assert_ne!(image.root_nid, 0);
+        for number in 0..10 {
+            assert_eq!(
+                read_file(&image, &format!("/a-{number}")).1,
+                vec![number; 2600]
+            );
+            assert_eq!(
+                read_file(&image, &format!("/z-{number}")).1,
+                vec![number; 1000]
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn incompressible_fallback_works_with_mapped_output() {
+        let temporary = TempDir::new().unwrap();
+        let source_dir = temporary.path().join("source");
+        fs::create_dir(&source_dir).unwrap();
+        let source = source_dir.join("libabsl_container.z.so");
+        let mut state = 0x1234abcd_u32;
+        let data: Vec<u8> = (0..7800)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        fs::write(&source, &data).unwrap();
+
+        let output = temporary.path().join("mapped-output.erofs");
+        let mut image = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&output)
+            .unwrap();
+        write_zeros(&mut image, 4096).unwrap();
+        let mapping = ReadOnlyMapping::new(&image);
+        image.seek(SeekFrom::Start(4096)).unwrap();
+
+        let mut entry = Entry {
+            host: source,
+            path: "/system/lib64/libabsl_container.z.so".to_owned(),
+            metadata: EntryMetadata {
+                mode: S_IFREG | 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+                mtime_nsec: 0,
+                rdev: 0,
+                original_nid: None,
+                symlink: None,
+                xattrs: BTreeMap::new(),
+            },
+            parent: 0,
+            children: Vec::new(),
+            alias: None,
+            size: data.len() as u64,
+            links: 1,
+            inode_size: 32,
+            xattrs: Vec::new(),
+            layout: EROFS_INODE_FLAT_INLINE,
+            data_union: u32::MAX,
+            inline: vec![0; data.len() % 4096],
+            compression: Vec::new(),
+            nid: 0,
+        };
+        write_regular(&mut image, &mut entry, &BuildOptions::default()).unwrap();
+
+        assert_eq!(entry.layout, EROFS_INODE_FLAT_INLINE);
+        assert_eq!(entry.inline, data[4096..]);
+        let mut external = vec![0; 4096];
+        image.seek(SeekFrom::Start(4096)).unwrap();
+        image.read_exact(&mut external).unwrap();
+        assert_eq!(external, data[..4096]);
+
+        let options = BuildOptions {
+            timestamp: Some(0),
+            ..BuildOptions::default()
+        };
+        let resolver = MetadataResolver::load(&options).unwrap();
+        let mut entries = Vec::new();
+        collect_entries(&source_dir, "/".to_owned(), 0, &resolver, &mut entries).unwrap();
+        let shared = prepare_entries(&mut entries, &options, 0).unwrap();
+        image.seek(SeekFrom::Start(0)).unwrap();
+        let report = write_filesystem(&mut image, &mut entries, &options, 0, &shared).unwrap();
+        assert_eq!(image.metadata().unwrap().len(), report.image_bytes);
+        drop(mapping);
+        drop(image);
+        crate::verify_image(&output).unwrap();
+        assert_eq!(
+            read_file(&read_image(&output), "/libabsl_container.z.so").1,
+            data
+        );
     }
 
     #[test]
@@ -1194,6 +1461,7 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(!extracted.join("config/erofs-metadata.json").exists());
         let extracted_source = extracted.join("initial");
         assert!(
             fs::read_link(extracted_source.join("bin"))
@@ -1205,11 +1473,7 @@ mod tests {
             b"target content"
         );
         let rebuilt = temporary.path().join("rebuilt.img");
-        let options = BuildOptions {
-            metadata_file: Some(extracted.join("config/erofs-metadata.json")),
-            ..BuildOptions::default()
-        };
-        build(&extracted_source, &rebuilt, &options).unwrap();
+        build(&extracted_source, &rebuilt, &BuildOptions::default()).unwrap();
         let image = read_image(&rebuilt);
         assert_eq!(read_file(&image, "/bin").1, b"/system/bin");
         assert_eq!(read_file(&image, "/relative").1, b"system/bin/tool");

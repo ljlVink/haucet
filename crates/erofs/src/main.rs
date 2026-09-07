@@ -232,9 +232,6 @@ fn write_fs_config_and_selinux_label(
     nodes: &[ErofsNode],
     sbi: &SbInfo,
 ) -> Result<(), ExtractError> {
-    metadata::write_extracted(config, nodes, sbi).map_err(|error| {
-        ExtractError::Initialization(format!("saving EROFS metadata: {error:#}"))
-    })?;
     let config_path = platform::join_host_path(&config.config_dir, &config.image_base_name);
     let fs_config_path = format!("{}_fs_config", config_path);
     let selinux_labels_path = format!("{}_file_contexts", config_path);

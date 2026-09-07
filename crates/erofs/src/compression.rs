@@ -1,3 +1,5 @@
+// Compact index encoding follows erofs-utils lib/compress.c (GPL-2.0+ OR MIT),
+// Copyright (C) 2018-2019 HUAWEI, Inc., by Gao Xiang.
 use std::ffi::{c_char, c_int, c_void};
 use std::fmt;
 use std::io::{Read, Seek, Write};
@@ -7,9 +9,9 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::erofs_fs::{
-    Z_EROFS_ADVISE_BIG_PCLUSTER_1, Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
-    Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_PCLUSTER_MAX_DSIZE,
-    Z_EROFS_PCLUSTER_MAX_SIZE,
+    Z_EROFS_ADVISE_BIG_PCLUSTER_1, Z_EROFS_ADVISE_BIG_PCLUSTER_2, Z_EROFS_ADVISE_COMPACTED_2B,
+    Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN,
+    Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_PCLUSTER_MAX_DSIZE, Z_EROFS_PCLUSTER_MAX_SIZE,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +70,150 @@ pub struct CompressedFile {
     pub physical_size: u64,
     pub compressed_blocks: u32,
     pub used_compression: bool,
+}
+
+impl CompressedFile {
+    /// Inodes are 32-byte aligned, so the header size determines pack alignment.
+    pub fn compact_indexes(&mut self, inode_header_size: usize, block_size: u32) -> Result<()> {
+        let indexes = &self.metadata[16..];
+        let total = indexes.len() / 8;
+        let big = u16::from_le_bytes(self.metadata[4..6].try_into().unwrap())
+            & Z_EROFS_ADVISE_BIG_PCLUSTER_1
+            != 0;
+        let advise = Z_EROFS_ADVISE_COMPACTED_2B
+            | if big {
+                Z_EROFS_ADVISE_BIG_PCLUSTER_1 | Z_EROFS_ADVISE_BIG_PCLUSTER_2
+            } else {
+                0
+            };
+        let mut output = self.metadata[..8].to_vec();
+        output[4..6].copy_from_slice(&advise.to_le_bytes());
+        let mut block = u32::from_le_bytes(indexes[4..8].try_into().unwrap());
+        let mut dummy_head = !big;
+        if !big {
+            block = block.wrapping_sub(1);
+        }
+        let lobits = block_size.trailing_zeros().max(12);
+        for (index, count) in compact_index_packs(total, inode_header_size) {
+            let pack_size = if count == 16 { 32 } else { 8 };
+            let encodebits = (pack_size - 4) * 8 / count;
+            let mut pack = vec![0u8; pack_size];
+            let mut base_block = block;
+            let mut update_base = big;
+            for slot in 0..count {
+                let zero = [0; 8];
+                let record = indexes
+                    .get((index + slot) * 8..(index + slot + 1) * 8)
+                    .unwrap_or(&zero);
+                let kind = u16::from_le_bytes(record[..2].try_into().unwrap()) as u8;
+                let offset = if kind == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+                    let back = u16::from_le_bytes(record[4..6].try_into().unwrap());
+                    if back & Z_EROFS_LI_D0_CBLKCNT != 0 {
+                        block = block
+                            .checked_add((back & !Z_EROFS_LI_D0_CBLKCNT) as u32)
+                            .context("compact EROFS block address overflow")?;
+                        dummy_head = false;
+                        back
+                    } else if slot + 1 == count {
+                        u16::from_le_bytes(record[6..8].try_into().unwrap())
+                            .min(Z_EROFS_LI_D0_CBLKCNT - 1)
+                    } else {
+                        back
+                    }
+                } else {
+                    if dummy_head {
+                        block = block.wrapping_add(1);
+                        if update_base {
+                            base_block = block;
+                        }
+                    }
+                    dummy_head = true;
+                    update_base = false;
+                    let stored = u32::from_le_bytes(record[4..8].try_into().unwrap());
+                    ensure!(
+                        stored == block || (stored == 0 && index + slot + 1 >= total),
+                        "non-contiguous physical clusters in compact EROFS indexes"
+                    );
+                    u16::from_le_bytes(record[2..4].try_into().unwrap())
+                };
+                ensure!(
+                    (offset as u32) < 1 << lobits,
+                    "compact EROFS index offset overflow"
+                );
+                let value = ((kind as u32) << lobits) | offset as u32;
+                let bit = slot * encodebits;
+                for n in 0..encodebits {
+                    pack[(bit + n) / 8] |= (((value >> n) & 1) as u8) << ((bit + n) % 8);
+                }
+            }
+            pack[pack_size - 4..].copy_from_slice(&base_block.to_le_bytes());
+            output.extend_from_slice(&pack);
+        }
+        self.metadata = output;
+        Ok(())
+    }
+}
+
+fn compact_index_packs(
+    total: usize,
+    inode_header_size: usize,
+) -> impl Iterator<Item = (usize, usize)> {
+    let map_start = inode_header_size.div_ceil(8) * 8 + 8;
+    let initial = ((32 - map_start % 32) / 4) & 7;
+    let initial = if initial > total { 0 } else { initial };
+    let compact = (total - initial) / 16 * 16;
+    let mut index = 0;
+    std::iter::from_fn(move || {
+        if index >= total {
+            return None;
+        }
+        let count = if index >= initial && index < initial + compact {
+            16
+        } else {
+            2
+        };
+        let start = index;
+        index += count;
+        Some((start, count))
+    })
+}
+
+pub fn relocate_indexes(
+    metadata: &mut [u8],
+    inode_header_size: usize,
+    total_indexes: usize,
+    compact: bool,
+    shift: u32,
+) -> Result<()> {
+    let relocate = |bytes: &mut [u8]| -> Result<()> {
+        let block = u32::from_le_bytes(bytes.try_into().unwrap());
+        bytes.copy_from_slice(
+            &block
+                .checked_add(shift)
+                .context("EROFS index address overflow")?
+                .to_le_bytes(),
+        );
+        Ok(())
+    };
+    if !compact {
+        for index in metadata[16..].chunks_exact_mut(8) {
+            if index[0] != Z_EROFS_LCLUSTER_TYPE_NONHEAD && index[4..8] != [0; 4] {
+                relocate(&mut index[4..8])?;
+            }
+        }
+    } else {
+        let mut offset = 8;
+        for (_, count) in compact_index_packs(total_indexes, inode_header_size) {
+            let size = if count == 16 { 32 } else { 8 };
+            relocate(&mut metadata[offset + size - 4..offset + size])?;
+            offset += size;
+        }
+        ensure!(
+            offset == metadata.len(),
+            "invalid compact EROFS index length"
+        );
+    }
+    Ok(())
 }
 
 unsafe extern "C" {
@@ -369,13 +515,13 @@ pub fn compress_file<R: Read, W: Write + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, SeekFrom};
+    use std::io::{Cursor, Read, SeekFrom};
     use std::sync::Arc;
 
     use crate::data::inode_pread;
     use crate::erofs_fs::{
         EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER, EROFS_FEATURE_INCOMPAT_LZ4_0PADDING,
-        EROFS_INODE_COMPRESSED_FULL, EROFS_SUPER_MAGIC_V1,
+        EROFS_INODE_COMPRESSED_COMPACT, EROFS_INODE_COMPRESSED_FULL, EROFS_SUPER_MAGIC_V1,
     };
     use crate::inode::Inode;
     use crate::io::Device;
@@ -402,6 +548,16 @@ mod tests {
         block_size: u32,
         cluster: u32,
     ) -> CompressedFile {
+        round_trip_layout(input, algorithm, block_size, cluster, None)
+    }
+
+    fn round_trip_layout(
+        input: &[u8],
+        algorithm: Compression,
+        block_size: u32,
+        cluster: u32,
+        compact_xattrs: Option<u32>,
+    ) -> CompressedFile {
         let block = block_size as u64;
         let mut image = tempfile::NamedTempFile::new().unwrap();
         let mut superblock = vec![0; 4096];
@@ -410,7 +566,7 @@ mod tests {
         superblock[1104..1108].copy_from_slice(&EROFS_FEATURE_INCOMPAT_LZ4_0PADDING.to_le_bytes());
         superblock[1108..1110].copy_from_slice(&u16::MAX.to_le_bytes());
         image.write_all(&superblock).unwrap();
-        let result = compress_file(
+        let mut result = compress_file(
             &mut Cursor::new(input),
             &mut image,
             block_size,
@@ -427,8 +583,29 @@ mod tests {
             result.metadata.len(),
             16 + input.len().div_ceil(block_size as usize) * 8
         );
+        let header_size = 64 + compact_xattrs.unwrap_or(0) as usize;
+        if compact_xattrs.is_some() {
+            let full_size = result.metadata.len();
+            result.compact_indexes(header_size, block_size).unwrap();
+            assert!(result.metadata.len() < full_size);
+        }
+        let mut payload = vec![0; result.physical_size as usize];
+        image.seek(SeekFrom::Start(4096)).unwrap();
+        image.read_exact(&mut payload).unwrap();
+        image.seek(SeekFrom::Start(4096 + 13 * block)).unwrap();
+        image.write_all(&payload).unwrap();
+        relocate_indexes(
+            &mut result.metadata,
+            header_size,
+            input.len().div_ceil(block_size as usize),
+            compact_xattrs.is_some(),
+            13,
+        )
+        .unwrap();
         let meta_block = image.stream_position().unwrap() / block;
-        image.write_all(&[0; 64]).unwrap();
+        image
+            .write_all(&vec![0; header_size.div_ceil(8) * 8])
+            .unwrap();
         image.write_all(&result.metadata).unwrap();
         let padded = image.stream_position().unwrap().div_ceil(block) * block;
         image.as_file_mut().set_len(padded).unwrap();
@@ -450,7 +627,12 @@ mod tests {
         let mut inode = Inode::new(Arc::new(sbi), 0);
         inode.i_size = result.original_size;
         inode.inode_isize = 64;
-        inode.datalayout = EROFS_INODE_COMPRESSED_FULL;
+        inode.xattr_isize = compact_xattrs.unwrap_or(0);
+        inode.datalayout = if compact_xattrs.is_some() {
+            EROFS_INODE_COMPRESSED_COMPACT
+        } else {
+            EROFS_INODE_COMPRESSED_FULL
+        };
         let mut restored = vec![0; input.len()];
         inode_pread(&mut inode, &mut restored, 0).unwrap();
         assert_eq!(restored, input);
@@ -561,5 +743,36 @@ mod tests {
                 round_trip_blocks(&input, Compression::Lz4, block, cluster);
             }
         }
+    }
+
+    #[test]
+    fn compact_indexes_roundtrip_pack_boundaries_and_xattr_alignments() {
+        let mut state = 79013;
+        let mut input = pseudorandom(701, &mut state).repeat(220);
+        input.extend(pseudorandom(65536, &mut state));
+        for block in [512, 1024, 2048, 4096] {
+            for cluster in [block, block * 4] {
+                for xattrs in (0..32).step_by(4) {
+                    for count in [1, 2, 5, 6, 7, 15, 16, 17, 21, 22, 23, 31, 32, 33] {
+                        let size = count * block as usize - 17;
+                        round_trip_layout(
+                            &input[..size],
+                            Compression::Lz4,
+                            block,
+                            cluster,
+                            Some(xattrs),
+                        );
+                    }
+                    round_trip_layout(&input, Compression::Lz4, block, cluster, Some(xattrs));
+                }
+            }
+        }
+        round_trip_layout(
+            &vec![0x62; Z_EROFS_PCLUSTER_MAX_DSIZE as usize + 321],
+            Compression::Lz4,
+            4096,
+            65536,
+            Some(12),
+        );
     }
 }

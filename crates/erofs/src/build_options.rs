@@ -26,6 +26,7 @@ pub struct BuildOptions {
     pub no_xattrs: bool,
     pub xattr_tolerance: u32,
     pub inline_data: bool,
+    pub compact_indexes: bool,
     pub checksum: bool,
 }
 
@@ -50,6 +51,7 @@ impl Default for BuildOptions {
             no_xattrs: false,
             xattr_tolerance: 2,
             inline_data: true,
+            compact_indexes: true,
             checksum: true,
         }
     }
@@ -144,7 +146,7 @@ impl BuildOptions {
                 "-E" => {
                     for feature in value.split(',') {
                         match feature {
-                            "legacy-compress" => {}
+                            "legacy-compress" => options.compact_indexes = false,
                             "noinline_data" => options.inline_data = false,
                             "nosbcrc" => options.checksum = false,
                             _ => bail!("unsupported mkfs.erofs extended option {feature:?}"),
@@ -223,6 +225,12 @@ mod tests {
             PathBuf::from("config dir/fs_config")
         );
         assert_eq!(options.force_uid, Some(0));
+        assert!(options.compact_indexes);
+        assert!(
+            !BuildOptions::from_args(&["-Elegacy-compress".into()])
+                .unwrap()
+                .compact_indexes
+        );
     }
 
     #[test]

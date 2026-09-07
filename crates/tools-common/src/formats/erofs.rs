@@ -1,4 +1,4 @@
-use super::hvb::{HvbFooter, HvbWrapper};
+use super::hvb::{HvbCert, HvbFooter, HvbWrapper};
 use crate::fs_util;
 use crate::tools::ToolPaths;
 use anyhow::{Context, Result, ensure};
@@ -15,7 +15,6 @@ const EROFS_MAGIC_OFFSET: u64 = 1024;
 const MANIFEST_NAME: &str = "haucet-erofs.json";
 const MANIFEST_VERSION: u32 = 1;
 const CERTIFICATE_NAME: &str = "hvb-certificate.bin";
-const METADATA_NAME: &str = "erofs-metadata.json";
 const HASH_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,11 +173,7 @@ pub fn repack(workspace: &Path, output: &Path, allow_grow: bool) -> Result<()> {
     );
 
     let result = (|| -> Result<()> {
-        let mut options = parse_mkfs_options(&fs_options_path, &config_dir)?;
-        let metadata_file = config_dir.join(METADATA_NAME);
-        if metadata_file.is_file() {
-            options.metadata_file = Some(metadata_file);
-        }
+        let options = parse_mkfs_options(&fs_options_path, &config_dir)?;
         eprintln!(
             "rebuilding {} with embedded Rust mkfs.erofs",
             manifest.partition
@@ -202,6 +197,7 @@ pub fn repack(workspace: &Path, output: &Path, allow_grow: bool) -> Result<()> {
                 wrapper.certificate.len() as u64 == wrapper.footer.cert_size,
                 "HVB certificate size changed"
             );
+            validate_hvb_image_size(raw_size, &wrapper)?;
             wrapper.write_repacked(&raw_path, &wrapped_path)?;
             eprintln!(
                 "warning: the original HVB certificate was preserved, not cryptographically re-signed"
@@ -236,6 +232,23 @@ pub fn repack(workspace: &Path, output: &Path, allow_grow: bool) -> Result<()> {
     }
     result?;
     eprintln!("wrote {}", output.display());
+    Ok(())
+}
+
+fn validate_hvb_image_size(raw_size: u64, wrapper: &HvbWrapper) -> Result<()> {
+    let certificate =
+        HvbCert::parse(&wrapper.certificate).context("parsing preserved HVB certificate")?;
+    let limit = if certificate.image_len != 0 {
+        certificate.image_len
+    } else {
+        wrapper.footer.image_size
+    };
+    ensure!(
+        raw_size <= limit,
+        "rebuilt EROFS image is {raw_size} bytes, exceeding the preserved HVB image length {limit}; \
+         the filesystem would extend past the device mapping. Reduce its size; --allow-grow cannot \
+         enlarge the mapping recorded in an unchanged HVB certificate"
+    );
     Ok(())
 }
 
@@ -428,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn repacks_without_external_tools_and_preserves_metadata_and_size() {
+    fn repacks_without_external_tools_and_preserves_config_and_size() {
         let temp = tempfile::tempdir().unwrap();
         let image = fixture_image(temp.path());
         let original_size = 256 * 1024;
@@ -446,7 +459,7 @@ mod tests {
         let payload = b"edited firmware payload\n";
         fs::write(source.join("system-note.txt"), payload).unwrap();
         let config = workspace.join(&manifest.config_dir);
-        assert!(config.join(METADATA_NAME).is_file());
+        assert!(!config.join("erofs-metadata.json").exists());
         fs::write(
             find_file_with_suffix(&config, "_fs_config").unwrap(),
             "/ 0 0 0755\n/system-note.txt 123 456 4750\n",
@@ -484,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn repack_preserves_hvb_certificate_and_metadata_paths_after_normalization() {
+    fn repack_preserves_hvb_certificate_and_config_paths_after_normalization() {
         let temp = tempfile::tempdir().unwrap();
         let raw = fixture_image(temp.path());
         let mut certificate = vec![0_u8; 240];
@@ -507,8 +520,7 @@ mod tests {
         unpack(&image, &workspace, false).unwrap();
         let manifest = read_manifest(&workspace).unwrap();
         assert_eq!(manifest.source_dir, "vendor");
-        let metadata = fs::read_to_string(workspace.join("config").join(METADATA_NAME)).unwrap();
-        assert!(metadata.contains("system-note.txt"));
+        assert!(!workspace.join("config/erofs-metadata.json").exists());
         let fs_config = fs::read_to_string(workspace.join("config/vendor_fs_config")).unwrap();
         assert!(fs_config.contains("/system-note.txt "));
         assert!(!fs_config.contains("/vendor-note.txt "));
@@ -522,6 +534,27 @@ mod tests {
             fs::metadata(&output).unwrap().len(),
             wrapper.footer.partition_size
         );
+
+        let certificate_path = workspace.join("config/hvb-certificate.bin");
+        let mut certificate = fs::read(&certificate_path).unwrap();
+        certificate[56..64].copy_from_slice(&4096u64.to_le_bytes());
+        fs::write(&certificate_path, certificate).unwrap();
+        for allow_grow in [false, true] {
+            let rejected = temp.path().join(format!("oversized-{allow_grow}.img"));
+            let error = repack(&workspace, &rejected, allow_grow).unwrap_err();
+            assert!(format!("{error:#}").contains("exceeding the preserved HVB image length"));
+            assert!(!rejected.exists());
+            assert!(
+                !fs_util::sibling_temporary(&rejected, "raw-erofs")
+                    .unwrap()
+                    .exists()
+            );
+            assert!(
+                !fs_util::sibling_temporary(&rejected, "wrapped")
+                    .unwrap()
+                    .exists()
+            );
+        }
     }
 
     #[test]
