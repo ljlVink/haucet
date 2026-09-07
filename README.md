@@ -37,11 +37,6 @@ haucet vcom flash COM3 0x80000000 loader.bin
 
 ## Build
 
-EROFS extraction and repacking are linked into the Rust binary through
-`crates/erofs`. These workflows do not require `bin/mkfs.erofs`, Cygwin, or a
-separate tools directory. The crate also provides standalone `extract-erofs`
-and `mkfs-erofs` binaries.
-
 ```sh
 cargo build --release
 ```
