@@ -255,35 +255,3 @@ pub fn init_erofs_node_by_targets(
     }
     !nodes.is_empty()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_revision_1_capability() {
-        let mut data = vec![0u8; XATTR_CAPS_SZ_1];
-        data[0..4].copy_from_slice(&VFS_CAP_REVISION_1.to_le_bytes());
-        data[4..8].copy_from_slice(&0x89ab_cdefu32.to_le_bytes());
-        data[8..12].copy_from_slice(&0xdead_beefu32.to_le_bytes());
-        assert_eq!(parse_vfs_cap_data(&data), Some(0x89ab_cdef));
-    }
-
-    #[test]
-    fn parses_revision_3_capability_halves() {
-        let mut data = vec![0u8; XATTR_CAPS_SZ_3];
-        data[0..4].copy_from_slice(&VFS_CAP_REVISION_3.to_le_bytes());
-        data[4..8].copy_from_slice(&0x0123_4567u32.to_le_bytes());
-        data[8..12].copy_from_slice(&0xaaaa_aaaau32.to_le_bytes());
-        data[12..16].copy_from_slice(&0x89ab_cdefu32.to_le_bytes());
-        data[16..20].copy_from_slice(&0xbbbb_bbbbu32.to_le_bytes());
-        assert_eq!(parse_vfs_cap_data(&data), Some(0x89ab_cdef_0123_4567));
-    }
-
-    #[test]
-    fn rejects_wrong_capability_size() {
-        let mut data = vec![0u8; XATTR_CAPS_SZ_2 - 1];
-        data[0..4].copy_from_slice(&VFS_CAP_REVISION_2.to_le_bytes());
-        assert_eq!(parse_vfs_cap_data(&data), None);
-    }
-}

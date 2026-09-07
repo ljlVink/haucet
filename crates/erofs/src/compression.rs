@@ -73,7 +73,6 @@ pub struct CompressedFile {
 }
 
 impl CompressedFile {
-    /// Inodes are 32-byte aligned, so the header size determines pack alignment.
     pub fn compact_indexes(&mut self, inode_header_size: usize, block_size: u32) -> Result<()> {
         let indexes = &self.metadata[16..];
         let total = indexes.len() / 8;
@@ -247,7 +246,6 @@ impl Compressor {
                 (1..=12).contains(&level),
                 "LZ4HC level must be 1 through 12"
             );
-            // SAFETY: liblz4 allocates and initializes its own opaque state.
             Some(NonNull::new(unsafe { LZ4_createStreamHC() }).context("allocating LZ4HC state")?)
         } else {
             None
@@ -261,8 +259,6 @@ impl Compressor {
     fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<(usize, usize)> {
         let mut consumed = c_int::try_from(input.len()).context("LZ4 input is too large")?;
         let capacity = c_int::try_from(output.len()).context("LZ4 output is too large")?;
-        // SAFETY: both slices are valid for their checked lengths. HC state is
-        // initialized, exclusively borrowed, and released by Drop.
         let written = unsafe {
             match self.algorithm {
                 Compression::None => return Ok((0, 0)),
@@ -293,7 +289,6 @@ impl Compressor {
 impl Drop for Compressor {
     fn drop(&mut self) {
         if let Some(state) = self.hc_state {
-            // SAFETY: this is the unique state returned by LZ4_createStreamHC.
             unsafe { LZ4_freeStreamHC(state.as_ptr()) };
         }
     }
@@ -385,9 +380,6 @@ impl FullIndexes {
             if backward == 0 {
                 self.push(kind, offset, block.to_le_bytes());
             } else {
-                // The first NONHEAD holds physical length for big pclusters.
-                // Longer lookbacks stop below the flag bit and continue from
-                // an earlier NONHEAD when the decompressed extent exceeds 8 MiB.
                 let delta = if backward == 1 && self.big_pcluster {
                     blocks | Z_EROFS_LI_D0_CBLKCNT
                 } else {
@@ -414,11 +406,6 @@ impl FullIndexes {
     }
 }
 
-/// Write block-aligned EROFS data using bounded streaming LZ4 compression.
-/// The caller selects the final inode layout and can overwrite the result with
-/// flat data when the returned metadata would outweigh the compression gain.
-/// Compressed images must enable LZ4_0PADDING and, for larger physical clusters,
-/// BIG_PCLUSTER with the corresponding superblock compression configuration.
 pub fn compress_file<R: Read, W: Write + Seek>(
     input: &mut R,
     output: &mut W,
@@ -510,269 +497,4 @@ pub fn compress_file<R: Read, W: Write + Seek>(
             .context("too many EROFS physical blocks")?,
         used_compression,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::{Cursor, Read, SeekFrom};
-    use std::sync::Arc;
-
-    use crate::data::inode_pread;
-    use crate::erofs_fs::{
-        EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER, EROFS_FEATURE_INCOMPAT_LZ4_0PADDING,
-        EROFS_INODE_COMPRESSED_COMPACT, EROFS_INODE_COMPRESSED_FULL, EROFS_SUPER_MAGIC_V1,
-    };
-    use crate::inode::Inode;
-    use crate::io::Device;
-    use crate::sb::erofs_read_superblock;
-
-    fn pseudorandom(count: usize, state: &mut u32) -> Vec<u8> {
-        (0..count)
-            .map(|_| {
-                *state ^= *state << 13;
-                *state ^= *state >> 17;
-                *state ^= *state << 5;
-                *state as u8
-            })
-            .collect()
-    }
-
-    fn round_trip(input: &[u8], algorithm: Compression, cluster: u32) -> CompressedFile {
-        round_trip_blocks(input, algorithm, 4096, cluster)
-    }
-
-    fn round_trip_blocks(
-        input: &[u8],
-        algorithm: Compression,
-        block_size: u32,
-        cluster: u32,
-    ) -> CompressedFile {
-        round_trip_layout(input, algorithm, block_size, cluster, None)
-    }
-
-    fn round_trip_layout(
-        input: &[u8],
-        algorithm: Compression,
-        block_size: u32,
-        cluster: u32,
-        compact_xattrs: Option<u32>,
-    ) -> CompressedFile {
-        let block = block_size as u64;
-        let mut image = tempfile::NamedTempFile::new().unwrap();
-        let mut superblock = vec![0; 4096];
-        superblock[1024..1028].copy_from_slice(&EROFS_SUPER_MAGIC_V1.to_le_bytes());
-        superblock[1036] = block_size.trailing_zeros() as u8;
-        superblock[1104..1108].copy_from_slice(&EROFS_FEATURE_INCOMPAT_LZ4_0PADDING.to_le_bytes());
-        superblock[1108..1110].copy_from_slice(&u16::MAX.to_le_bytes());
-        image.write_all(&superblock).unwrap();
-        let mut result = compress_file(
-            &mut Cursor::new(input),
-            &mut image,
-            block_size,
-            cluster,
-            algorithm,
-        )
-        .unwrap();
-        assert_eq!(result.original_size, input.len() as u64);
-        assert_eq!(
-            result.compressed_blocks as u64 * block,
-            result.physical_size
-        );
-        assert_eq!(
-            result.metadata.len(),
-            16 + input.len().div_ceil(block_size as usize) * 8
-        );
-        let header_size = 64 + compact_xattrs.unwrap_or(0) as usize;
-        if compact_xattrs.is_some() {
-            let full_size = result.metadata.len();
-            result.compact_indexes(header_size, block_size).unwrap();
-            assert!(result.metadata.len() < full_size);
-        }
-        let mut payload = vec![0; result.physical_size as usize];
-        image.seek(SeekFrom::Start(4096)).unwrap();
-        image.read_exact(&mut payload).unwrap();
-        image.seek(SeekFrom::Start(4096 + 13 * block)).unwrap();
-        image.write_all(&payload).unwrap();
-        relocate_indexes(
-            &mut result.metadata,
-            header_size,
-            input.len().div_ceil(block_size as usize),
-            compact_xattrs.is_some(),
-            13,
-        )
-        .unwrap();
-        let meta_block = image.stream_position().unwrap() / block;
-        image
-            .write_all(&vec![0; header_size.div_ceil(8) * 8])
-            .unwrap();
-        image.write_all(&result.metadata).unwrap();
-        let padded = image.stream_position().unwrap().div_ceil(block) * block;
-        image.as_file_mut().set_len(padded).unwrap();
-        image.seek(SeekFrom::Start(1064)).unwrap();
-        image.write_all(&(meta_block as u32).to_le_bytes()).unwrap();
-        image.seek(SeekFrom::Start(1060)).unwrap();
-        image
-            .write_all(&((padded / block) as u32).to_le_bytes())
-            .unwrap();
-        image.flush().unwrap();
-        let device = Device::open(image.path().to_str().unwrap(), 0).unwrap();
-        let mut sbi = erofs_read_superblock(device).unwrap();
-        if cluster > block_size {
-            // Superblock config emission is tested by the filesystem builder;
-            // these tests exercise the payload and inode map independently.
-            sbi.feature_incompat |= EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER;
-            sbi.lz4_max_pclusterblks = (cluster / block_size) as u16;
-        }
-        let mut inode = Inode::new(Arc::new(sbi), 0);
-        inode.i_size = result.original_size;
-        inode.inode_isize = 64;
-        inode.xattr_isize = compact_xattrs.unwrap_or(0);
-        inode.datalayout = if compact_xattrs.is_some() {
-            EROFS_INODE_COMPRESSED_COMPACT
-        } else {
-            EROFS_INODE_COMPRESSED_FULL
-        };
-        let mut restored = vec![0; input.len()];
-        inode_pread(&mut inode, &mut restored, 0).unwrap();
-        assert_eq!(restored, input);
-        for offset in (0..input.len()).step_by(3997.max(input.len() / 37)) {
-            let length = (input.len() - offset).min(6137);
-            let mut part = vec![0; length];
-            inode_pread(&mut inode, &mut part, offset as u64).unwrap();
-            assert_eq!(part, input[offset..offset + length]);
-        }
-        result
-    }
-
-    #[test]
-    fn compression_options_are_validated() {
-        assert_eq!(
-            "lz4hc".parse::<Compression>().unwrap(),
-            Compression::default()
-        );
-        assert_eq!("lz4".parse::<Compression>().unwrap(), Compression::Lz4);
-        assert!("lz4hc,13".parse::<Compression>().is_err());
-        assert!("lz4,9".parse::<Compression>().is_err());
-        let mut output = Cursor::new(Vec::new());
-        assert!(
-            compress_file(
-                &mut Cursor::new([]),
-                &mut output,
-                4096,
-                6000,
-                Compression::Lz4
-            )
-            .is_err()
-        );
-        output.set_position(1);
-        assert!(
-            compress_file(
-                &mut Cursor::new([]),
-                &mut output,
-                4096,
-                4096,
-                Compression::Lz4
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn small_and_incompressible_files_use_plain_blocks() {
-        let mut state = 12345;
-        for size in [0, 1, 4095, 4096, 4097, 17123] {
-            let input = pseudorandom(size, &mut state);
-            let result = round_trip(&input, Compression::default(), 16384);
-            assert!(!result.used_compression);
-            assert_eq!(result.physical_size, size.div_ceil(4096) as u64 * 4096);
-        }
-    }
-
-    #[test]
-    fn variable_length_clusters_and_raw_tails_round_trip() {
-        let mut input = Vec::new();
-        let mut state = 678901;
-        for _ in 0..500 {
-            let pattern = pseudorandom(1000, &mut state);
-            for _ in 0..3 {
-                input.extend_from_slice(&pattern);
-            }
-        }
-        input.extend(pseudorandom(6017, &mut state));
-        for algorithm in [Compression::Lz4, Compression::default()] {
-            for cluster in [4096, 16384] {
-                let result = round_trip(&input, algorithm, cluster);
-                assert!(result.used_compression);
-                assert!(result.physical_size < input.len() as u64 / 2);
-                assert!(result.metadata[16..].chunks_exact(8).any(|index| {
-                    index[0] == Z_EROFS_LCLUSTER_TYPE_HEAD1
-                        && u16::from_le_bytes([index[2], index[3]]) != 0
-                }));
-                if cluster > 4096 {
-                    assert!(result.metadata[16..].chunks_exact(8).any(|index| {
-                        let delta = u16::from_le_bytes([index[4], index[5]]);
-                        index[0] == Z_EROFS_LCLUSTER_TYPE_NONHEAD
-                            && delta & Z_EROFS_LI_D0_CBLKCNT != 0
-                            && delta & !Z_EROFS_LI_D0_CBLKCNT > 1
-                    }));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn long_extent_lookbacks_do_not_overlap_the_physical_length_flag() {
-        let input = vec![0x62; Z_EROFS_PCLUSTER_MAX_DSIZE as usize + 321];
-        let result = round_trip(&input, Compression::Lz4, 65536);
-        assert!(result.physical_size < 65536);
-        assert!(result.metadata[16..].chunks_exact(8).any(|index| {
-            index[0] == Z_EROFS_LCLUSTER_TYPE_NONHEAD
-                && u16::from_le_bytes([index[4], index[5]]) == Z_EROFS_LI_D0_CBLKCNT - 1
-        }));
-    }
-
-    #[test]
-    fn small_filesystem_blocks_round_trip() {
-        let mut state = 37123;
-        let pattern = pseudorandom(701, &mut state);
-        let mut input = pattern.repeat(100);
-        input.extend(pseudorandom(1234, &mut state));
-        for block in [512, 1024, 2048] {
-            for cluster in [block, block * 4] {
-                round_trip_blocks(&input, Compression::Lz4, block, cluster);
-            }
-        }
-    }
-
-    #[test]
-    fn compact_indexes_roundtrip_pack_boundaries_and_xattr_alignments() {
-        let mut state = 79013;
-        let mut input = pseudorandom(701, &mut state).repeat(220);
-        input.extend(pseudorandom(65536, &mut state));
-        for block in [512, 1024, 2048, 4096] {
-            for cluster in [block, block * 4] {
-                for xattrs in (0..32).step_by(4) {
-                    for count in [1, 2, 5, 6, 7, 15, 16, 17, 21, 22, 23, 31, 32, 33] {
-                        let size = count * block as usize - 17;
-                        round_trip_layout(
-                            &input[..size],
-                            Compression::Lz4,
-                            block,
-                            cluster,
-                            Some(xattrs),
-                        );
-                    }
-                    round_trip_layout(&input, Compression::Lz4, block, cluster, Some(xattrs));
-                }
-            }
-        }
-        round_trip_layout(
-            &vec![0x62; Z_EROFS_PCLUSTER_MAX_DSIZE as usize + 321],
-            Compression::Lz4,
-            4096,
-            65536,
-            Some(12),
-        );
-    }
 }

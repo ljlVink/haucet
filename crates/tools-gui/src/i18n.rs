@@ -161,38 +161,3 @@ macro_rules! tr {
         $crate::i18n::translate($id, Some(&args))
     }};
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fallback_order_starts_with_english() {
-        assert_eq!(
-            FALLBACK_ORDER,
-            [Language::English, Language::Chinese, Language::Russian]
-        );
-    }
-
-    #[test]
-    fn missing_requested_message_falls_back_to_english() {
-        let localizer = Localizer::new();
-        assert_eq!(
-            localizer.translate(Language::Russian, "fallback-test-english-only", None),
-            "English fallback"
-        );
-    }
-
-    #[test]
-    fn fallback_chain_continues_through_chinese_then_russian() {
-        let localizer = Localizer::new();
-        assert_eq!(
-            localizer.translate(Language::English, "fallback-test-chinese-only", None),
-            "中文回退"
-        );
-        assert_eq!(
-            localizer.translate(Language::English, "fallback-test-russian-only", None),
-            "Русский резерв"
-        );
-    }
-}

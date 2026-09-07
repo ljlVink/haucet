@@ -21,8 +21,6 @@ fn cvt(ret: libc::c_int) -> io::Result<()> {
 
 pub(crate) fn process_defaults() -> ProcessDefaults {
     let superuser = unsafe { libc::geteuid() } == 0;
-    // libc::umask changes a process-global setting, so reading it would make
-    // an embedded extraction change the host application's behavior.
     ProcessDefaults {
         umask: 0o022,
         superuser,

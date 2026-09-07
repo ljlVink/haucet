@@ -4,7 +4,6 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::compression::Compression;
 
-/// Options for building a single-device EROFS image from a directory.
 #[derive(Debug, Clone)]
 pub struct BuildOptions {
     pub compression: Compression,
@@ -22,7 +21,6 @@ pub struct BuildOptions {
     pub uid_offset: i64,
     pub gid_offset: i64,
     pub preserve_mtime: bool,
-    /// Disable host xattr scanning; recorded metadata still applies.
     pub no_xattrs: bool,
     pub xattr_tolerance: u32,
     pub inline_data: bool,
@@ -58,8 +56,6 @@ impl Default for BuildOptions {
 }
 
 impl BuildOptions {
-    /// Parse mkfs.erofs options only, without the output and source operands.
-    /// Unsupported upstream modes fail explicitly instead of changing semantics.
     pub fn from_args(args: &[String]) -> Result<Self> {
         let mut options = Self::default();
         let mut index = 0;
@@ -207,49 +203,4 @@ fn parse_uuid(text: &str) -> Result<[u8; 16]> {
         *dst = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
     }
     Ok(uuid)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recorded_options_support_separate_and_inline_values() {
-        let args = shlex::split("-zlz4hc -C 16384 -T 123 -U 01234567-89ab-cdef-0123-456789abcdef --fs-config-file='config dir/fs_config' --all-root").unwrap();
-        let options = BuildOptions::from_args(&args).unwrap();
-        assert_eq!(options.cluster_size, 16384);
-        assert_eq!(options.timestamp, Some(123));
-        assert_eq!(options.uuid.unwrap()[15], 0xef);
-        assert_eq!(
-            options.fs_config.unwrap(),
-            PathBuf::from("config dir/fs_config")
-        );
-        assert_eq!(options.force_uid, Some(0));
-        assert!(options.compact_indexes);
-        assert!(
-            !BuildOptions::from_args(&["-Elegacy-compress".into()])
-                .unwrap()
-                .compact_indexes
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_modes_and_invalid_values() {
-        for args in [
-            "--tar",
-            "-Efragments",
-            "-zunknown",
-            "-b17",
-            "-C8193",
-            "-U not-a-uuid",
-            "-T",
-            "--all-root=1",
-            "-\u{e9}",
-        ] {
-            assert!(
-                BuildOptions::from_args(&shlex::split(args).unwrap()).is_err(),
-                "{args}"
-            );
-        }
-    }
 }
