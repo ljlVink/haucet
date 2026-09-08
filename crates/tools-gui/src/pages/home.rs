@@ -249,7 +249,7 @@ enum ActionKind {
 
 fn suggested_actions(kind: FileKind) -> Vec<(String, Page, ActionKind)> {
     match kind {
-        FileKind::ZipPackage => vec![(
+        FileKind::ZipPackage | FileKind::UpdateApp => vec![(
             tr!("action-unpack-package"),
             Page::Package,
             ActionKind::Input,

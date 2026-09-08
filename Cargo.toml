@@ -18,6 +18,12 @@ resolver = "3"
 #[profile.release]
 #lto = true
 
+# Keep multi-gigabyte ZIP inspection responsive in development builds.
+[profile.dev.package.zlib-rs]
+opt-level = 3
+# Its C-ABI total_in counter wraps at 4 GiB on Windows; the Rust API keeps u64 totals.
+overflow-checks = false
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -34,7 +40,7 @@ ext4-metadata = { package = "ext4", version = "0.9.0" }
 ext4-view = { version = "0.9.3", features = ["std"] }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
 egui = "0.32"
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 fs2 = "0.4"
 hex = "0.4"
 libc = "0.2"

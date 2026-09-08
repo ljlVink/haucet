@@ -4,14 +4,14 @@ use crate::util::{
     human_size, message_box, open_in_file_manager, section, sibling_output_path,
     update_derived_path,
 };
-use common::package::{PackageIndex, UpdateLayout};
+use common::package::{PackageFormat, PackageIndex, UpdateLayout};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 #[derive(Debug)]
 enum PendingOp {
     Inspect { input: String, layout: UpdateLayout },
-    Unpack { output: String },
+    Unpack { input: String, output: String },
 }
 
 #[derive(Debug, Default)]
@@ -63,7 +63,7 @@ impl PackagePage {
                     &tr!("update-file"),
                     &mut self.input,
                     &tr!("choose-file"),
-                    Some(&["zip", "bin"]),
+                    Some(&["zip", "bin", "app"]),
                 );
                 if input_response.changed {
                     self.input_dirty = true;
@@ -96,13 +96,12 @@ impl PackagePage {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let ready = !app.job_running()
-                        && !self.input.trim().is_empty()
-                        && !self.output.trim().is_empty();
+                    let ready = !app.job_running() && self.can_unpack();
                     if run_button(ui, &tr!("start-unpack"), ready, None).clicked() {
                         let partitions = self.selected_partitions();
                         let output = self.output.trim().to_owned();
                         self.pending = Some(PendingOp::Unpack {
+                            input: self.input.trim().to_owned(),
                             output: output.clone(),
                         });
                         self.result = None;
@@ -122,6 +121,7 @@ impl PackagePage {
 
                 ui.add_space(4.0);
                 let layout_before = self.layout;
+                let is_app = self.is_update_app();
                 egui::CollapsingHeader::new(tr!("advanced-options"))
                     .id_salt("package-advanced")
                     .show(ui, |ui| {
@@ -129,21 +129,25 @@ impl PackagePage {
                             .num_columns(2)
                             .spacing([16.0, 8.0])
                             .show(ui, |ui| {
-                                ui.label(tr!("update-bin-layout"));
-                                egui::ComboBox::from_id_salt("package-layout")
-                                    .selected_text(layout_label(self.layout))
-                                    .show_ui(ui, |ui| {
-                                        for layout in
-                                            [UpdateLayout::Auto, UpdateLayout::L1, UpdateLayout::L2]
-                                        {
-                                            ui.selectable_value(
-                                                &mut self.layout,
-                                                layout,
-                                                layout_label(layout),
-                                            );
-                                        }
-                                    });
-                                ui.end_row();
+                                if !is_app {
+                                    ui.label(tr!("update-bin-layout"));
+                                    egui::ComboBox::from_id_salt("package-layout")
+                                        .selected_text(layout_label(self.layout))
+                                        .show_ui(ui, |ui| {
+                                            for layout in [
+                                                UpdateLayout::Auto,
+                                                UpdateLayout::L1,
+                                                UpdateLayout::L2,
+                                            ] {
+                                                ui.selectable_value(
+                                                    &mut self.layout,
+                                                    layout,
+                                                    layout_label(layout),
+                                                );
+                                            }
+                                        });
+                                    ui.end_row();
+                                }
                                 ui.label(tr!("custom-partitions"));
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.custom_partitions)
@@ -152,9 +156,14 @@ impl PackagePage {
                                 );
                                 ui.end_row();
                                 ui.label(tr!("options"));
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     ui.checkbox(&mut self.force, tr!("overwrite-existing-output"));
-                                    ui.checkbox(&mut self.all_erofs, tr!("only-erofs-partitions"));
+                                    if !is_app {
+                                        ui.checkbox(
+                                            &mut self.all_erofs,
+                                            tr!("only-erofs-partitions"),
+                                        );
+                                    }
                                 });
                                 ui.end_row();
                             });
@@ -171,6 +180,10 @@ impl PackagePage {
                     ui.add_space(6.0);
                 }
                 if let Some(index) = self.index.clone() {
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("{}:", tr!("package-format")));
+                        ui.monospace(index.format.to_string());
+                    });
                     if let Some(version) = &index.package_version {
                         ui.horizontal(|ui| {
                             ui.strong(format!("{}:", tr!("package-version")));
@@ -272,9 +285,16 @@ impl PackagePage {
                     "components" => index.components.len(),
                     "images" => image_count,
                 ));
+                if index.format == PackageFormat::UpdateApp {
+                    self.layout = UpdateLayout::Auto;
+                    self.all_erofs = false;
+                }
                 self.index = Some(index);
             }
-            PendingOp::Unpack { output } => {
+            PendingOp::Unpack { input, output } => {
+                if input != self.input.trim() {
+                    return;
+                }
                 self.result = Some(ResultView {
                     ok: result.ok,
                     summary: result.summary,
@@ -282,6 +302,21 @@ impl PackagePage {
                 });
             }
         }
+    }
+
+    fn is_update_app(&self) -> bool {
+        self.index
+            .as_ref()
+            .is_some_and(|index| index.format == PackageFormat::UpdateApp)
+    }
+
+    fn can_unpack(&self) -> bool {
+        !self.input.trim().is_empty()
+            && !self.output.trim().is_empty()
+            && !self.input_dirty
+            && !self.inspect_pending
+            && self.index.is_some()
+            && ((!self.is_update_app() && self.all_erofs) || !self.selected_partitions().is_empty())
     }
 
     fn selected_partitions(&self) -> Vec<String> {
@@ -310,8 +345,8 @@ impl PackagePage {
         section(ui, &tr!("package-partitions"));
         ui.horizontal(|ui| {
             if ui.button(tr!("select-all")).clicked() {
-                for checked in &mut self.checked {
-                    *checked = true;
+                for (component, checked) in index.components.iter().zip(&mut self.checked) {
+                    *checked = component.component_type == 0;
                 }
             }
             if ui.button(tr!("select-none")).clicked() {
@@ -323,6 +358,7 @@ impl PackagePage {
         ui.add_space(4.0);
         let components = &index.components;
         let mut checked = self.checked.clone();
+        let mut changed_selection = None;
         TableBuilder::new(ui)
             .striped(true)
             .column(Column::auto().at_least(50.0))
@@ -353,7 +389,9 @@ impl PackagePage {
                     body.row(20.0, |mut row| {
                         row.col(|ui| {
                             if selectable {
-                                ui.checkbox(&mut checked[position], "");
+                                if ui.checkbox(&mut checked[position], "").changed() {
+                                    changed_selection = Some((position, checked[position]));
+                                }
                             } else {
                                 ui.weak("—");
                             }
@@ -378,6 +416,26 @@ impl PackagePage {
                 }
             });
         self.checked = checked;
+        if let Some((position, selected)) = changed_selection {
+            self.set_partition_checked(position, selected);
+        }
+    }
+
+    fn set_partition_checked(&mut self, position: usize, selected: bool) {
+        let Some(index) = &self.index else {
+            return;
+        };
+        let name = &index.components[position].name;
+        // APP selection is by header name, so duplicate records form one group.
+        for (other, (component, checked)) in
+            index.components.iter().zip(&mut self.checked).enumerate()
+        {
+            if other == position
+                || (index.format == PackageFormat::UpdateApp && component.name == *name)
+            {
+                *checked = selected;
+            }
+        }
     }
 
     fn show_result(&self, ui: &mut egui::Ui) {

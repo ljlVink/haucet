@@ -9,10 +9,10 @@ use crate::{bytes, fs_util};
 use anyhow::{Context, Result, ensure};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use zip::ZipArchive;
 use zip::result::ZipError;
+use zip::{CompressionMethod, ZipArchive};
 
 pub const UPDATE_APP_MAGIC: [u8; 4] = [0x55, 0xaa, 0x5a, 0xa5];
 const FIXED_HEADER_LEN: usize = 98;
@@ -21,21 +21,18 @@ const MAX_METADATA_LEN: u64 = 64 * 1024 * 1024;
 const MAX_RECORDS: usize = 16 * 1024;
 const MAX_SCAN_LEN: u64 = 1024 * 1024;
 const IO_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+const ZIP_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
-    /// Lowercase name from the header, before adding the output suffix.
     pub name: String,
-    /// Unique filename: name.img, name_2.img, name_3.img, etc.
     pub output_name: String,
     pub index: usize,
     pub header_offset: u64,
     pub header_size: u64,
     pub data_offset: u64,
     pub size: u64,
-    /// Fixed header, including the magic. Preserves all vendor metadata.
     pub header: [u8; FIXED_HEADER_LEN],
-    /// All bytes from offset 98 to header_size. Retained, not verified.
     pub checksum: Vec<u8>,
 }
 
@@ -50,26 +47,86 @@ pub struct Extracted {
     pub path: PathBuf,
 }
 
-/// Inspect a raw APP file or the single UPDATE.APP entry in a ZIP/ZIP64 file.
-/// Payloads are streamed and discarded, including when reading a compressed ZIP.
-pub fn inspect(input: &Path) -> Result<Index> {
-    with_input(input, |reader, length| inspect_reader(reader, Some(length)))
+/// Probe a raw file for aligned APP magic within the parser's initial scan limit.
+/// This does not validate records or decompress ZIP entries.
+pub fn probe_file(input: &Path) -> Result<bool> {
+    let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut word = [0_u8; 4];
+    for _ in 0..=MAX_SCAN_LEN / 4 {
+        if read_up_to(&mut reader, &mut word)? != word.len() {
+            return Ok(false);
+        }
+        if word == UPDATE_APP_MAGIC {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
-/// Inspect a raw APP stream, starting at offset zero.
-/// When supplied, total_length must be the complete stream length.
+pub fn inspect(input: &Path) -> Result<Index> {
+    let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
+    match ZipArchive::new(BufReader::with_capacity(ZIP_BUFFER_SIZE, file)) {
+        Ok(mut archive) => inspect_archive(&mut archive),
+        Err(ZipError::InvalidArchive(_)) => {
+            let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
+            inspect_seekable_reader(file)
+        }
+        Err(error) => Err(error).context("probing UPDATE.APP as ZIP/ZIP64 archive"),
+    }
+}
+
+fn inspect_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Index> {
+    let entry_index = find_update_app(archive)?;
+    let directory_start = archive.central_directory_start();
+    let mut entry = archive.by_index(entry_index)?;
+    let size = entry.size();
+    if entry.compression() == CompressionMethod::Stored {
+        ensure!(
+            entry.compressed_size() == size,
+            "invalid stored UPDATE.APP size"
+        );
+        let end = entry
+            .data_start()
+            .checked_add(size)
+            .context("UPDATE.APP ZIP offset overflow")?;
+        ensure!(
+            end <= directory_start,
+            "stored UPDATE.APP extends into the ZIP directory"
+        );
+        drop(entry);
+        inspect_seekable_reader(archive.by_index_seek(entry_index)?)
+    } else {
+        // APP headers are interleaved with payloads. A compressed entry
+        // must still be decoded sequentially to reach every header.
+        inspect_reader(&mut entry, Some(size))
+    }
+}
+
 pub fn inspect_reader<R: Read>(reader: R, total_length: Option<u64>) -> Result<Index> {
     walk_records(reader, total_length, |_, _| Ok(()))
 }
 
-/// Extract all images from a raw APP or a ZIP/ZIP64 containing UPDATE.APP.
+fn inspect_seekable_reader<R: Read + Seek>(mut reader: R) -> Result<Index> {
+    let length = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(0))?;
+    walk_records_with_skip(
+        BufReader::new(reader),
+        Some(length),
+        |reader, remaining| {
+            // walk_records_with_skip checks each payload end against length
+            // before seeking, since seeking past EOF itself would succeed.
+            reader.seek_relative(i64::try_from(remaining)?)?;
+            Ok(())
+        },
+        |_, _| Ok(()),
+    )
+}
+
 pub fn unpack(input: &Path, out: &Path, force: bool) -> Result<Vec<Extracted>> {
     unpack_selected(input, out, None, force)
 }
 
-/// Extract matching header names (case-insensitive, optional .img suffix).
-/// None or an empty list selects all records; a name selects all its duplicates.
-/// Existing files require force. Unrelated files in out are left intact.
 pub fn unpack_selected(
     input: &Path,
     out: &Path,
@@ -82,9 +139,6 @@ pub fn unpack_selected(
     })
 }
 
-/// Extract from a raw APP stream using the same selection rules as unpack_selected.
-/// Callers must ensure the output directory does not contain the stream's source.
-/// Writes are atomic per image; completed images remain if a later record fails.
 pub fn unpack_reader<R: Read>(
     reader: R,
     total_length: Option<u64>,
@@ -113,6 +167,27 @@ pub fn unpack_reader<R: Read>(
                 return Err(error).with_context(|| format!("checking {}", path.display()));
             }
         }
+        if force {
+            // A cancelled GUI worker can leave this image's atomic-write temporary.
+            let temporary = fs_util::sibling_temporary(&path, "splituapp")?;
+            match fs::symlink_metadata(&temporary) {
+                Ok(metadata) => {
+                    ensure!(
+                        metadata.file_type().is_file(),
+                        "temporary output is not a regular file: {}",
+                        temporary.display()
+                    );
+                    fs::remove_file(&temporary).with_context(|| {
+                        format!("removing incomplete image {}", temporary.display())
+                    })?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("checking {}", temporary.display()));
+                }
+            }
+        }
+        eprintln!("extracting {} ({} bytes)", record.output_name, record.size);
         fs_util::atomic_write(&path, "splituapp", |writer| {
             let copied = io::copy(payload, writer)?;
             ensure!(
@@ -141,29 +216,10 @@ pub fn unpack_reader<R: Read>(
 fn with_input<T>(input: &Path, read: impl FnOnce(&mut dyn Read, u64) -> Result<T>) -> Result<T> {
     let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
     let length = file.metadata()?.len();
-    match ZipArchive::new(file) {
+    match ZipArchive::new(BufReader::with_capacity(ZIP_BUFFER_SIZE, file)) {
         Ok(mut archive) => {
-            let mut found = None;
-            for index in 0..archive.len() {
-                let entry = archive.by_index(index)?;
-                let enclosed = entry
-                    .enclosed_name()
-                    .with_context(|| format!("unsafe ZIP entry name {:?}", entry.name()))?;
-                if !entry.is_dir()
-                    && enclosed
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.eq_ignore_ascii_case("UPDATE.APP"))
-                {
-                    ensure!(
-                        found.is_none(),
-                        "archive contains multiple UPDATE.APP entries"
-                    );
-                    found = Some(index);
-                }
-            }
-            let mut entry =
-                archive.by_index(found.context("archive does not contain UPDATE.APP")?)?;
+            let entry_index = find_update_app(&mut archive)?;
+            let mut entry = archive.by_index(entry_index)?;
             let size = entry.size();
             read(&mut entry, size)
         }
@@ -176,12 +232,52 @@ fn with_input<T>(input: &Path, read: impl FnOnce(&mut dyn Read, u64) -> Result<T
     }
 }
 
+fn find_update_app<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<usize> {
+    let mut found = None;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        let enclosed = entry
+            .enclosed_name()
+            .with_context(|| format!("unsafe ZIP entry name {:?}", entry.name()))?;
+        if !entry.is_dir()
+            && enclosed
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("UPDATE.APP"))
+        {
+            ensure!(
+                found.is_none(),
+                "archive contains multiple UPDATE.APP entries"
+            );
+            found = Some(index);
+        }
+    }
+    found.context("archive does not contain UPDATE.APP")
+}
+
 fn walk_records<R: Read>(
     reader: R,
     total_length: Option<u64>,
+    visit: impl FnMut(&Record, &mut dyn Read) -> Result<()>,
+) -> Result<Index> {
+    walk_records_with_skip(
+        BufReader::with_capacity(IO_BUFFER_SIZE, reader),
+        total_length,
+        |reader, remaining| {
+            let skipped = io::copy(&mut reader.take(remaining), &mut io::sink())?;
+            ensure!(skipped == remaining, "UPDATE.APP record is truncated");
+            Ok(())
+        },
+        visit,
+    )
+}
+
+fn walk_records_with_skip<R: Read>(
+    mut reader: R,
+    total_length: Option<u64>,
+    mut skip: impl FnMut(&mut R, u64) -> Result<()>,
     mut visit: impl FnMut(&Record, &mut dyn Read) -> Result<()>,
 ) -> Result<Index> {
-    let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
     let mut offset = 0_u64;
     let mut metadata_size = 0_u64;
     let mut occurrences = HashMap::<String, usize>::new();
@@ -246,23 +342,15 @@ fn walk_records<R: Read>(
             header,
             checksum,
         };
-
-        // Bound the visitor to this payload so image data containing magic is
-        // never mistaken for a record. Unselected payloads are drained as well.
         let mut payload = reader.by_ref().take(size);
         visit(&record, &mut payload)
             .with_context(|| format!("extracting {}", record.output_name))?;
         let remaining = payload.limit();
-        let skipped = io::copy(&mut payload, &mut io::sink())?;
-        ensure!(
-            skipped == remaining,
-            "UPDATE.APP record {} is truncated",
-            record.name
-        );
+        skip(&mut reader, remaining)
+            .with_context(|| format!("skipping UPDATE.APP record {}", record.name))?;
         offset = payload_end;
         let mut padding = [0_u8; 3];
         let padding_len = ((4 - offset % 4) % 4) as usize;
-        // A final payload may end at EOF without its optional alignment bytes.
         offset += read_up_to(&mut reader, &mut padding[..padding_len])? as u64;
         check_length(offset, total_length)?;
         records.push(record);

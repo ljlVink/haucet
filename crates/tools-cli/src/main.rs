@@ -26,7 +26,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Unpack an update package into a workspace directory
+    /// Unpack update.bin, UPDATE.APP, or a ZIP containing either format
     #[command(arg_required_else_help = true)]
     Unpack(FullUnpackArgs),
     /// Unpack or repack an EROFS image
@@ -167,15 +167,24 @@ enum VcomCommand {
 
 #[derive(Debug, Args)]
 struct FullUnpackArgs {
+    /// Raw update.bin / UPDATE.APP file or ZIP/ZIP64 package
     input: PathBuf,
-    #[arg(short, long)]
-    out: PathBuf,
+    /// Output workspace; extracted images are written to images/
+    #[arg(short, long, required_unless_present = "list")]
+    out: Option<PathBuf>,
+    /// List package images without extracting them
+    #[arg(long, conflicts_with_all = ["out", "partitions", "all_erofs", "force"])]
+    list: bool,
+    /// APP: select images; update.bin: select filesystems to expand
     #[arg(short = 'p', long = "partition")]
     partitions: Vec<String>,
+    /// Expand only EROFS filesystems (update.bin only)
     #[arg(long, conflicts_with = "partitions")]
     all_erofs: bool,
+    /// Component table layout (update.bin only)
     #[arg(long, default_value_t = UpdateLayout::Auto)]
     layout: UpdateLayout,
+    /// APP: replace matching images; update.bin: replace the output workspace
     #[arg(long)]
     force: bool,
 }
@@ -306,9 +315,29 @@ enum CpioCommands {
 }
 
 fn run_unpack_command(args: FullUnpackArgs) -> Result<()> {
+    if args.list {
+        let index = package::inspect(&args.input, args.layout)?;
+        println!("format: {}", index.format);
+        if let Some(version) = index.package_version {
+            println!("version: {version}");
+        }
+        println!(
+            "{:<24} {:>12} {:>18}",
+            "IMAGE", "SIZE (BYTES)", "DATA OFFSET"
+        );
+        for component in index.components {
+            println!(
+                "{:<24} {:>12} {:#018X}",
+                component.output_name, component.size, component.data_offset
+            );
+        }
+        return Ok(());
+    }
     package::unpack_full(
         &args.input,
-        &args.out,
+        args.out
+            .as_deref()
+            .context("--out is required for unpacking")?,
         &args.partitions,
         args.all_erofs,
         args.layout,

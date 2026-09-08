@@ -11,6 +11,8 @@ Haucet is a Rust CLI and desktop GUI for Huawei HarmonyOS firmware analysis and 
 
 ```sh
 haucet unpack update.bin --out images
+haucet unpack UPDATE.APP --list
+haucet unpack UPDATE.APP --out app-work --partition boot --partition super
 haucet unpack update_full_base.zip --out work
 haucet unpack update_full_base.zip --out work --partition system --partition vendor
 haucet unpack update_full_base.zip --out work --all-erofs

@@ -15,6 +15,7 @@ const EROFS_MAGIC: &[u8; 4] = &[0xe2, 0xe1, 0xf5, 0xe0];
 pub enum FileKind {
     Unknown,
     ZipPackage,
+    UpdateApp,
     Erofs,
     Ext4,
     HarmonyFrame,
@@ -34,6 +35,7 @@ impl FileKind {
         match self {
             Self::Unknown => tr!("format-unknown"),
             Self::ZipPackage => tr!("format-zip-update"),
+            Self::UpdateApp => "UPDATE.APP".to_owned(),
             Self::Erofs => tr!("format-erofs-image"),
             Self::Ext4 => tr!("format-ext4-image"),
             Self::HarmonyFrame => tr!("format-harmony-image"),
@@ -117,9 +119,10 @@ fn detect_file(path: &Path) -> (FileKind, String) {
     }
 
     // update.bin: TLV type 0x01 (L2) or 0x11 (L1) + sane component table size
+    // TODO: IS HERE SHOULD CHANGE FROM LE TO BE BYTES?
     if head_len >= 180 {
-        let tlv_type = u16::from_be_bytes([head[0], head[1]]);
-        let compinfo_len = u16::from_be_bytes([head[178], head[179]]) as usize;
+        let tlv_type = u16::from_le_bytes([head[0], head[1]]);
+        let compinfo_len = u16::from_le_bytes([head[178], head[179]]) as usize;
         if (tlv_type == 0x01 || tlv_type == 0x11)
             && compinfo_len > 0
             && compinfo_len <= 8 * 1024 * 1024
@@ -130,6 +133,10 @@ fn detect_file(path: &Path) -> (FileKind, String) {
                 tr!("detect-update-bin", "count" => compinfo_len / 71),
             );
         }
+    }
+
+    if common::splituapp::probe_file(path).unwrap_or(false) {
+        return (FileKind::UpdateApp, tr!("detect-update-app"));
     }
 
     // cpio archive

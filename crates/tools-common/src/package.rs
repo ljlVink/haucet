@@ -3,7 +3,7 @@ use crate::formats::erofs;
 use crate::formats::ext4;
 use crate::formats::harmony::HARMONY_MAGIC;
 use crate::formats::header::{FileFormat, check_fmt};
-use crate::fs_util;
+use crate::{fs_util, splituapp};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -92,11 +92,82 @@ pub struct Component {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageIndex {
+    #[serde(default)]
+    pub format: PackageFormat,
     pub layout: UpdateLayout,
     pub data_offset: u64,
     pub components: Vec<Component>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_version: Option<String>,
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PackageFormat {
+    #[default]
+    UpdateBin,
+    UpdateApp,
+}
+
+impl fmt::Display for PackageFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::UpdateBin => "update.bin",
+            Self::UpdateApp => "UPDATE.APP",
+        })
+    }
+}
+
+fn detect_format(input: &Path) -> Result<PackageFormat> {
+    let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
+    match ZipArchive::new(file) {
+        Ok(mut archive) => {
+            let mut found = None;
+            for index in 0..archive.len() {
+                let entry = archive.by_index(index)?;
+                let enclosed = entry
+                    .enclosed_name()
+                    .with_context(|| format!("unsafe ZIP entry name {:?}", entry.name()))?;
+                if entry.is_dir() {
+                    continue;
+                }
+                let Some(name) = enclosed.file_name().and_then(OsStr::to_str) else {
+                    continue;
+                };
+                let format = if name.eq_ignore_ascii_case("UPDATE.APP") {
+                    PackageFormat::UpdateApp
+                } else if name.eq_ignore_ascii_case("update.bin") {
+                    PackageFormat::UpdateBin
+                } else {
+                    continue;
+                };
+                ensure!(
+                    found.is_none(),
+                    "archive contains multiple update payloads (update.bin or UPDATE.APP)"
+                );
+                found = Some(format);
+            }
+            found.context("archive does not contain update.bin or UPDATE.APP")
+        }
+        Err(ZipError::InvalidArchive(_)) => {
+            let mut header = Vec::with_capacity(HEADER_LEN);
+            File::open(input)?
+                .take(HEADER_LEN as u64)
+                .read_to_end(&mut header)?;
+            // Prefer a known update.bin header over magic embedded in its payload.
+            if header.len() == HEADER_LEN
+                && matches!(bytes::read_u16(&header, 0)?, 0x01 | 0x11)
+                && bytes::read_u16(&header, COMPINFO_LEN_OFFSET)? > 0
+            {
+                return Ok(PackageFormat::UpdateBin);
+            }
+            Ok(if splituapp::probe_file(input)? {
+                PackageFormat::UpdateApp
+            } else {
+                PackageFormat::UpdateBin
+            })
+        }
+        Err(error) => Err(error).context("probing ZIP/ZIP64 archive"),
+    }
 }
 
 pub fn unpack_reader<R: Read>(
@@ -196,6 +267,7 @@ pub fn read_index<R: Read>(
     }
 
     Ok(PackageIndex {
+        format: PackageFormat::UpdateBin,
         layout,
         data_offset: offset,
         components,
@@ -429,6 +501,26 @@ struct PackageManifest {
 }
 
 pub fn inspect(input: &Path, layout: UpdateLayout) -> Result<PackageIndex> {
+    if detect_format(input)? == PackageFormat::UpdateApp {
+        let index = splituapp::inspect(input)?;
+        return Ok(PackageIndex {
+            format: PackageFormat::UpdateApp,
+            layout: UpdateLayout::Auto,
+            data_offset: index.records[0].data_offset,
+            components: index
+                .records
+                .into_iter()
+                .map(|record| Component {
+                    name: record.name,
+                    output_name: record.output_name,
+                    component_type: 0,
+                    size: record.size,
+                    data_offset: record.data_offset,
+                })
+                .collect(),
+            package_version: None,
+        });
+    }
     if is_update_bin_file(input)? {
         let file = File::open(input)
             .with_context(|| format!("opening update package {}", input.display()))?;
@@ -567,6 +659,21 @@ pub fn unpack_full(
     force: bool,
 ) -> Result<()> {
     fs_util::ensure_output_does_not_contain(input, out)?;
+    if detect_format(input)? == PackageFormat::UpdateApp {
+        ensure!(
+            layout == UpdateLayout::Auto,
+            "--layout applies only to update.bin"
+        );
+        ensure!(!all_erofs, "--all-erofs is not supported for UPDATE.APP");
+        let images_dir = out.join("images");
+        let extracted = splituapp::unpack_selected(input, &images_dir, Some(partitions), force)?;
+        eprintln!(
+            "extracted {} UPDATE.APP images to {}",
+            extracted.len(),
+            images_dir.display()
+        );
+        return Ok(());
+    }
     unpack_full_inner(
         input,
         out,
@@ -644,7 +751,12 @@ fn unpack_full_inner(input: &Path, out: &Path, options: FullUnpackOptions<'_>) -
             let enclosed = entry
                 .enclosed_name()
                 .with_context(|| format!("unsafe ZIP entry name {:?}", entry.name()))?;
-            if enclosed.file_name() == Some(OsStr::new("update.bin")) {
+            if !entry.is_dir()
+                && enclosed
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("update.bin"))
+            {
                 ensure!(
                     components.is_none(),
                     "archive contains multiple update.bin entries"

@@ -538,6 +538,9 @@ fn job_label(op: &JobOp) -> String {
 fn result_owner(op: &JobOp, current: Page) -> ResultOwner {
     match op {
         JobOp::OnlineFetch { .. } => ResultOwner::Page(Page::Online),
+        JobOp::PackageInspect { .. } | JobOp::PackageUnpack { .. } => {
+            ResultOwner::Page(Page::Package)
+        }
         JobOp::ErofsUnpack { .. } | JobOp::ErofsRepack { .. } => {
             ResultOwner::Image(ImageKind::Erofs)
         }

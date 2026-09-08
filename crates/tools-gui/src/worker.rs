@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use common::formats::{cpio, erofs, ext4, header::check_fmt_full};
-use common::package::UpdateLayout;
+use common::package::{PackageFormat, UpdateLayout};
 use common::{entropy, fs_util, nvme, oeminfo, package, partition, ramdisk};
 use hisi_vcom::transport::{self, DeviceFilter, SerialVcomDevice};
 use hisi_vcom::vcom;
@@ -157,10 +157,15 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
         }
         JobOp::PackageInspect { input, layout } => {
             let index = package::inspect(Path::new(input), *layout)?;
-            summary_payload(
-                tr!("worker-package-inspected", "count" => index.components.len(), "layout" => layout_label(index.layout)),
-                index,
-            )
+            let summary = match index.format {
+                PackageFormat::UpdateApp => {
+                    tr!("worker-app-inspected", "count" => index.components.len())
+                }
+                PackageFormat::UpdateBin => {
+                    tr!("worker-package-inspected", "count" => index.components.len(), "layout" => layout_label(index.layout))
+                }
+            };
+            summary_payload(summary, index)
         }
         JobOp::PackageUnpack {
             input,
