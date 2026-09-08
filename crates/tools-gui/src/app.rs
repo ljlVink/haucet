@@ -344,6 +344,16 @@ impl HaucetApp {
                 self.dialog = Some(dialog);
             }
         }
+        if common::version::GIT_DIRTY {
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(tr!("unstable-version"))
+                        .size(16.0)
+                        .color(egui::Color32::ORANGE),
+                );
+            });
+        }
     }
 
     fn show_dialog(&mut self, ctx: &egui::Context) {

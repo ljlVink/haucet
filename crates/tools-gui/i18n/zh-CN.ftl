@@ -7,6 +7,7 @@ font-warning = 未找到支持所选语言的字体，部分界面文字可能�
 nav-files-images = 文件与镜像
 nav-devices-flashing = 设备与刷写
 nav-other = 其他
+unstable-version = unstable version
 settings-heading = 设置
 dialog-close = 关闭
 about-version = 版本 {$version}

@@ -7,6 +7,7 @@ font-warning = Не найден шрифт с поддержкой выбран
 nav-files-images = Файлы и образы
 nav-devices-flashing = Устройства и прошивка
 nav-other = Прочее
+unstable-version = unstable version
 settings-heading = Настройки
 dialog-close = Закрыть
 about-version = Версия {$version}

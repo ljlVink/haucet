@@ -7,6 +7,7 @@ font-warning = A font that supports the selected language was not found. Some te
 nav-files-images = Files and images
 nav-devices-flashing = Devices and flashing
 nav-other = Other
+unstable-version = unstable version
 settings-heading = Settings
 dialog-close = Close
 about-version = Version {$version}

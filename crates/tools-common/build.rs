@@ -8,6 +8,18 @@ fn main() {
 
     emit_git_rerun_paths(&repository);
 
+    let status_trigger = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("git-status-trigger");
+    println!("cargo:rerun-if-changed={}", status_trigger.display());
+    println!("cargo:rustc-check-cfg=cfg(haucet_git_dirty)");
+    if git_output(
+        &repository,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )
+    .is_some()
+    {
+        println!("cargo:rustc-cfg=haucet_git_dirty");
+    }
+
     let package_version = env::var("CARGO_PKG_VERSION").unwrap();
     let tag = git_output(&repository, &["describe", "--tags", "--abbrev=0"]);
     let commit =
