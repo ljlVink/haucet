@@ -13,6 +13,9 @@ pub const OEMINFO_STANDARD_HEADER_SIZE: usize = 0x200;
 pub const OEMINFO_STANDARD_ALIGNMENT: usize = 0x1000;
 pub const OEMINFO_REUSED_ALIGNMENT: usize = 0x80;
 pub const OEMINFO_MAX_EMBEDDED_IMAGE_SIZE: u64 = 256 * 1024 * 1024;
+/// Largest age accepted by the device HAL; writers roll over with
+/// `(age + 1) % 0x3B9ACA00`, so slots are valid only while `age <= 0x3B9AC9FF`.
+pub const OEMINFO_MAX_AGE: u32 = 0x3B9AC9FF;
 
 const PROBE_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 const PROBE_SCAN_LIMIT: u64 = 64 * 1024 * 1024;
@@ -606,16 +609,19 @@ fn probe_header(prefix: &[u8], offset: usize, absolute_offset: u64, file_size: u
         return false;
     }
     let version = read_u32(prefix, offset + 8);
+    let length = read_u32(prefix, offset + 20);
+    let age = read_u32(prefix, offset + 24);
     let field_padding = uniform_byte(&prefix[offset + 28..offset + 32]);
     let tail_padding =
         uniform_byte(&prefix[offset + OEMINFO_HEADER_SIZE..offset + OEMINFO_REUSED_HEADER_SIZE]);
     if version == 0
         || version > MAX_PLAUSIBLE_VERSION
+        || length == 0
+        || age > OEMINFO_MAX_AGE
         || !matches!((field_padding, tail_padding), (Some(field), Some(tail)) if field == tail)
     {
         return false;
     }
-    let length = read_u32(prefix, offset + 20) as usize;
     let header_size = if offset + OEMINFO_STANDARD_HEADER_SIZE <= prefix.len()
         && standard_padding(prefix, offset).is_some()
     {
@@ -644,6 +650,9 @@ fn parse_header(raw: &[u8], offset: usize) -> Option<ParsedBlock> {
     let sub_id = read_u32(raw, offset + 16);
     let length = read_u32(raw, offset + 20);
     let age = read_u32(raw, offset + 24);
+    if length == 0 || age > OEMINFO_MAX_AGE {
+        return None;
+    }
     let field_padding = uniform_byte(&raw[offset + 28..offset + 32]);
     let short_tail_padding = offset
         .checked_add(OEMINFO_REUSED_HEADER_SIZE)
@@ -735,13 +744,26 @@ fn resolve_compact_layouts(blocks: &mut [ParsedBlock]) {
     }
 }
 
+/// Physical copy key the firmware groups generations by. REUSED items carry a
+/// real sub-index at +0x10 and are keyed on `(id, sub_id)`. STANDARD items
+/// instead store a payload block count (`ceil(length / 512)`) there, which
+/// changes when the payload length changes between the A/B generations, so
+/// their copies are keyed on `id` alone — otherwise a resized item would split
+/// into two groups and both generations would look active.
+fn copy_key(block: &ParsedBlock) -> (u32, u32) {
+    match block.layout {
+        OemInfoLayout::Reused => (block.id, block.sub_id),
+        OemInfoLayout::Standard | OemInfoLayout::StandardCompact => (block.id, 0),
+    }
+}
+
 fn infer_region_size(file_size: usize, blocks: &[ParsedBlock]) -> usize {
     let fallback = file_size.div_ceil(2);
     let minimum_distance = MIN_INFERRED_REGION_SIZE.max(fallback / 2);
     let mut groups: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
     for block in blocks {
         groups
-            .entry((block.id, block.sub_id))
+            .entry(copy_key(block))
             .or_default()
             .push(block.offset);
     }
@@ -793,10 +815,7 @@ fn classify_regions_and_active(blocks: &mut [ParsedBlock], region_size: usize) {
     let mut groups: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
     for (index, block) in blocks.iter().enumerate() {
         if block.region != OemInfoRegion::Unknown {
-            groups
-                .entry((block.id, block.sub_id))
-                .or_default()
-                .push(index);
+            groups.entry(copy_key(block)).or_default().push(index);
         }
     }
 
