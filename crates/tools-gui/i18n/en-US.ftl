@@ -6,6 +6,9 @@ font-warning = A font that supports the selected language was not found. Some te
     Install Noto Sans CJK, Microsoft YaHei, or another suitable font, then restart.
 nav-files-images = Files and images
 nav-devices-flashing = Devices and flashing
+nav-other = Other
+settings-heading = Settings
+dialog-close = Close
 about-version = Version {$version}
 log-clear = Clear
 log-copy = Copy

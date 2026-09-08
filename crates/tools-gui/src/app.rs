@@ -28,7 +28,14 @@ pub(crate) struct HaucetApp {
     pub settings: Settings,
     pub font_loaded: bool,
     pub logo: Option<egui::TextureHandle>,
+    dialog: Option<AppDialog>,
     results: ResultStore,
+}
+
+#[derive(Clone, Copy)]
+enum AppDialog {
+    About,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +103,7 @@ impl HaucetApp {
             settings,
             font_loaded,
             logo,
+            dialog: None,
             results: ResultStore::default(),
         }
     }
@@ -129,6 +137,8 @@ impl eframe::App for HaucetApp {
                         });
                 });
         }
+
+        self.show_dialog(ctx);
 
         if self.job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -319,53 +329,92 @@ impl HaucetApp {
                 self.nav(page);
             }
         }
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new(tr!("about-heading")).weak());
-                ui.label(
-                    egui::RichText::new(tr!("about-description"))
-                        .weak()
-                        .size(11.0),
-                );
-                ui.label(
-                    egui::RichText::new(
-                        tr!("about-version", "version" => common::version::VERSION),
-                    )
-                    .weak()
-                    .size(11.0),
-                );
-                ui.label(egui::RichText::new(LICENSE_SPDX).weak().size(11.0));
-                ui.hyperlink_to(
-                    egui::RichText::new(tr!("repository-label"))
-                        .weak()
-                        .size(11.0),
-                    REPOSITORY_URL,
-                );
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(tr!("language-label")).weak().size(11.0));
-                let previous = self.settings.language;
-                egui::ComboBox::from_id_salt("language-select")
-                    .selected_text(self.settings.language.native_name())
-                    .width(120.0)
-                    .show_ui(ui, |ui| {
-                        for language in Language::ALL {
-                            ui.selectable_value(
-                                &mut self.settings.language,
-                                language,
-                                language.native_name(),
-                            );
-                        }
-                    });
-                if self.settings.language != previous {
-                    i18n::set_language(self.settings.language);
-                    self.settings.save();
+        nav_group_label(ui, &tr!("nav-other"));
+        for (dialog, label) in [
+            (AppDialog::About, tr!("about-heading")),
+            (AppDialog::Settings, tr!("settings-heading")),
+        ] {
+            if ui
+                .add_sized(
+                    [ui.available_width(), 40.0],
+                    egui::Button::selectable(false, egui::RichText::new(label).size(15.0)),
+                )
+                .clicked()
+            {
+                self.dialog = Some(dialog);
+            }
+        }
+    }
+
+    fn show_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.dialog else {
+            return;
+        };
+        let (id, title) = match dialog {
+            AppDialog::About => ("about-dialog", tr!("about-heading")),
+            AppDialog::Settings => ("settings-dialog", tr!("settings-heading")),
+        };
+        let response = egui::Modal::new(egui::Id::new(id))
+            .frame(egui::Frame::popup(&ctx.style()).inner_margin(20))
+            .show(ctx, |ui| {
+                ui.set_width(400.0);
+                apply_content_text_style(ui);
+                ui.horizontal(|ui| {
+                    if let Some(logo) = &self.logo {
+                        ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(48.0, 48.0)));
+                        ui.add_space(8.0);
+                    }
+                    ui.heading(title);
+                });
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+                match dialog {
+                    AppDialog::About => {
+                        ui.heading("Haucet");
+                        ui.label(tr!("about-description"));
+                        ui.add_space(8.0);
+                        ui.label(tr!("about-version", "version" => common::version::VERSION));
+                        ui.label(LICENSE_SPDX);
+                        ui.hyperlink_to(tr!("repository-label"), REPOSITORY_URL);
+                    }
+                    AppDialog::Settings => {
+                        ui.horizontal(|ui| {
+                            ui.label(tr!("language-label"));
+                            let previous = self.settings.language;
+                            egui::ComboBox::from_id_salt("language-select")
+                                .selected_text(self.settings.language.native_name())
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    for language in Language::ALL {
+                                        ui.selectable_value(
+                                            &mut self.settings.language,
+                                            language,
+                                            language.native_name(),
+                                        );
+                                    }
+                                });
+                            if self.settings.language != previous {
+                                i18n::set_language(self.settings.language);
+                                self.settings.save();
+                                ctx.request_repaint();
+                            }
+                        });
+                    }
                 }
+                ui.add_space(20.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_sized([88.0, 32.0], egui::Button::new(tr!("dialog-close")))
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                });
             });
-        });
+        if response.should_close() {
+            self.dialog = None;
+        }
     }
 
     fn log_panel(&mut self, ui: &mut egui::Ui) {

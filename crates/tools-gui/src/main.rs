@@ -50,13 +50,8 @@ fn main() -> eframe::Result<()> {
 type LogoData = (Vec<u8>, [usize; 2]);
 
 fn load_logo() -> (Option<egui::IconData>, Option<LogoData>) {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let logo_path = manifest_dir.join("../../assets/logo-icon.png");
-    let bytes = match std::fs::read(&logo_path) {
-        Ok(bytes) => bytes,
-        Err(_) => return (None, None),
-    };
-    let Ok(image) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) else {
+    let bytes = include_bytes!("../../../assets/logo-icon.png");
+    let Ok(image) = image::load_from_memory_with_format(bytes, image::ImageFormat::Png) else {
         return (None, None);
     };
     let rgba = image.to_rgba8();

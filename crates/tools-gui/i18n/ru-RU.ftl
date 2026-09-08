@@ -6,6 +6,9 @@ font-warning = Не найден шрифт с поддержкой выбран
     Установите Noto Sans CJK, Microsoft YaHei или другой подходящий шрифт и перезапустите приложение.
 nav-files-images = Файлы и образы
 nav-devices-flashing = Устройства и прошивка
+nav-other = Прочее
+settings-heading = Настройки
+dialog-close = Закрыть
 about-version = Версия {$version}
 log-clear = Очистить
 log-copy = Копировать
