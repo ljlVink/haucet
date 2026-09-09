@@ -26,6 +26,24 @@ pub struct FastbootStatusPayload {
     pub vars: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+enum FastbootTab {
+    #[default]
+    Extract,
+    Memory,
+    Flash,
+}
+
+impl FastbootTab {
+    fn label(self) -> String {
+        match self {
+            Self::Extract => tr!("extract-partition"),
+            Self::Memory => tr!("fastboot-memory-title"),
+            Self::Flash => tr!("flash-image"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingOp {
     Status,
@@ -47,6 +65,7 @@ pub struct FastbootPage {
     pub extract_result: Option<ResultView>,
     pub result: Option<ResultView>,
     pub reboot_result: Option<ResultView>,
+    tab: FastbootTab,
     memory_map: Option<MemoryMap>,
     selected_memory: Option<usize>,
     memory_result: Option<ResultView>,
@@ -68,11 +87,22 @@ impl FastbootPage {
                 ui.set_width(ui.available_width());
                 self.status_section(ui, app);
                 ui.add_space(10.0);
-                self.extract_section(ui, app);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tr!("operation")).strong());
+                    for tab in [
+                        FastbootTab::Extract,
+                        FastbootTab::Memory,
+                        FastbootTab::Flash,
+                    ] {
+                        ui.selectable_value(&mut self.tab, tab, tab.label());
+                    }
+                });
                 ui.add_space(10.0);
-                self.memory_section(ui, app);
-                ui.add_space(10.0);
-                self.flash_section(ui, app);
+                ui.push_id(self.tab, |ui| match self.tab {
+                    FastbootTab::Extract => self.extract_section(ui, app),
+                    FastbootTab::Memory => self.memory_section(ui, app),
+                    FastbootTab::Flash => self.flash_section(ui, app),
+                });
                 ui.add_space(20.0);
             });
     }
@@ -196,7 +226,6 @@ impl FastbootPage {
     }
 
     fn extract_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        section(ui, &tr!("extract-partition"));
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(tr!("partition-name")).strong());
             ui.add(
@@ -248,7 +277,6 @@ impl FastbootPage {
     }
 
     fn memory_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        section(ui, &tr!("fastboot-memory-title"));
         let ready = !app.job_running()
             && self
                 .status
@@ -339,7 +367,6 @@ impl FastbootPage {
     }
 
     fn flash_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        section(ui, &tr!("flash-image"));
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(tr!("image-file")).strong());
             let image_response = ui.add(
