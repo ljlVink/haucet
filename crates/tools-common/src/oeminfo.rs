@@ -13,8 +13,6 @@ pub const OEMINFO_STANDARD_HEADER_SIZE: usize = 0x200;
 pub const OEMINFO_STANDARD_ALIGNMENT: usize = 0x1000;
 pub const OEMINFO_REUSED_ALIGNMENT: usize = 0x80;
 pub const OEMINFO_MAX_EMBEDDED_IMAGE_SIZE: u64 = 256 * 1024 * 1024;
-/// Largest age accepted by the device HAL; writers roll over with
-/// `(age + 1) % 0x3B9ACA00`, so slots are valid only while `age <= 0x3B9AC9FF`.
 pub const OEMINFO_MAX_AGE: u32 = 0x3B9AC9FF;
 
 const PROBE_CHUNK_SIZE: usize = 2 * 1024 * 1024;
@@ -108,6 +106,18 @@ pub struct OemInfoImageSummary {
     pub compact_blocks: usize,
     pub reused_blocks: usize,
     pub blocks: Vec<OemInfoBlockSummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OemInfoOverview {
+    pub base_version: Option<String>,
+    pub full_version: Option<String>,
+    pub product_model: Option<String>,
+    pub cust_version: Option<String>,
+    pub preload_version: Option<String>,
+    pub base_component: Option<String>,
+    pub device_certificate: Option<bool>,
+    pub other_versions: Vec<(u32, u32, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,6 +340,77 @@ impl ParsedBlock {
 
 pub fn inspect(path: &Path) -> Result<OemInfoImageSummary> {
     Ok(OemInfoImage::from_file(path)?.summary())
+}
+
+/// Distills well-known identity/version blocks from a parsed image summary.
+///
+/// Only active copies are considered. Every field stays `None` when its
+/// block is absent or carries no usable text, so callers can always render
+/// every row. Component strings keep their full recorded form, e.g.
+/// `TAS-AN00-CUST 104.2.0.136(C00)` and `TAS-LGRP3-CHN 104.2.0.136`.
+pub fn overview(summary: &OemInfoImageSummary) -> OemInfoOverview {
+    let mut result = OemInfoOverview::default();
+    let mut other_versions = Vec::new();
+    for block in summary.blocks.iter().filter(|block| block.active) {
+        let text = block
+            .text_preview
+            .as_deref()
+            .map(truncate_at_escape)
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        match (block.id, block.sub_id) {
+            (2601 | 2603, _) => result.device_certificate = Some(true),
+            (1516, 1) if text.is_some() => {
+                result.base_version = text.map(str::to_owned);
+            }
+            (1518, 1) if text.is_some() => {
+                result.product_model = text.map(str::to_owned);
+            }
+            (1101, 4) if text.is_some() && result.full_version.is_none() => {
+                result.full_version = text.map(str::to_owned);
+            }
+            (80, 1) if text.is_some() => {
+                result.cust_version = text.map(str::to_owned);
+            }
+            (82, 1) if text.is_some() => {
+                result.preload_version = text.map(str::to_owned);
+            }
+            (86, 1) if text.is_some() => {
+                result.base_component = text.map(str::to_owned);
+            }
+            _ => {
+                if let Some(text) = text.filter(|text| looks_like_version(text)) {
+                    other_versions.push((block.id, block.sub_id, text.to_owned()));
+                }
+            }
+        }
+    }
+    result.other_versions = other_versions;
+    result
+}
+
+/// Cuts a sanitized payload preview at the first non-printable escape
+/// (`\x00`, `\xff`, …) so trailing padding does not reach the overview.
+fn truncate_at_escape(preview: &str) -> &str {
+    match preview.find("\\x") {
+        Some(index) => &preview[..index],
+        None => preview,
+    }
+}
+
+fn looks_like_version(text: &str) -> bool {
+    let trimmed = text.trim();
+    (3..=64).contains(&trimmed.len())
+        && trimmed
+            .chars()
+            .all(|char| char.is_ascii_graphic() || char == ' ')
+        && trimmed.split(['(', ')', ' ', ';', '|', ',']).any(|token| {
+            let parts = token.split('.').collect::<Vec<_>>();
+            parts.len() >= 2
+                && parts
+                    .iter()
+                    .all(|part| !part.is_empty() && part.chars().all(|char| char.is_ascii_digit()))
+        })
 }
 
 pub fn read_embedded_image(
@@ -717,10 +798,22 @@ fn standard_padding(raw: &[u8], offset: usize) -> Option<u8> {
     let short_tail_padding =
         uniform_byte(&raw[offset + OEMINFO_HEADER_SIZE..offset + OEMINFO_REUSED_HEADER_SIZE]);
     let expected = short_tail_padding.or(field_padding).unwrap_or(0xff);
-    raw[offset + OEMINFO_HEADER_SIZE..end]
+    let tail = &raw[offset + OEMINFO_HEADER_SIZE..end];
+    if tail.iter().all(|byte| *byte == expected) {
+        return Some(expected);
+    }
+    // HarmonyOS NEXT writers zero the reserved fields (+0x20..+0x2c) and pad
+    // the long tail with 0xff, producing a two-segment uniform pattern that
+    // the single-byte check above rejects. Accept it as STANDARD padding; a
+    // genuine REUSED record carries payload data past +0x40 instead.
+    let zero_prefix = tail
         .iter()
-        .all(|byte| *byte == expected)
-        .then_some(expected)
+        .position(|byte| *byte != 0)
+        .unwrap_or(tail.len());
+    let padding_tail = &tail[zero_prefix..];
+    (!padding_tail.is_empty() && zero_prefix <= 0x10)
+        .then(|| uniform_byte(padding_tail).filter(|byte| *byte == 0xff))
+        .flatten()
 }
 
 fn uniform_byte(bytes: &[u8]) -> Option<u8> {
