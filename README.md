@@ -31,6 +31,7 @@ haucet fastboot devices
 haucet fastboot flash updater updater_vendor.img
 haucet fastboot getvar product
 haucet fastboot extract-part oeminfo oeminfo.img
+haucet fastboot analyse-storage
 haucet fastboot reboot
 haucet fastboot oem device-info
 haucet vcom devices

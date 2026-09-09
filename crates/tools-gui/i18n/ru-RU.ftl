@@ -282,6 +282,21 @@ flash-data-warning = ⚠ Прошивка перезапишет данные р
 flash-image-hint = Прошить образ в целевой раздел (поддерживаются raw и Android sparse)
 status-parse-error = Не удалось разобрать результат поиска: {$error}
 
+fastboot-storage-title = Анализ хранилища
+fastboot-storage-analyse = Анализировать хранилище устройства
+fastboot-storage-hint = Прочитать GPT устройства и вывести все разделы с байтовыми смещениями
+fastboot-storage-not-loaded = Анализ хранилища ещё не выполнен.
+fastboot-storage-block-size = Размер логического блока
+fastboot-storage-start = Начальное смещение
+fastboot-storage-end = Конечное смещение
+fastboot-storage-head-error = Не удалось прочитать начало хранилища (upload-storage).
+fastboot-storage-parse-error = Не удалось разобрать GPT устройства из начала хранилища.
+fastboot-storage-no-table = В начале хранилища устройства нет читаемого GPT.
+fastboot-storage-header = Заголовок GPT по смещению {$offset}, размер логического блока {$block} байт.
+fastboot-storage-listed = Найдено разделов: {$count}.
+fastboot-storage-payload-error = Не удалось разобрать результат анализа хранилища: {$error}
+job-fastboot-storage-analyse = Анализ хранилища устройства
+
 fastboot-memory-title = Чтение памяти
 fastboot-memory-get-list = Получить список памяти
 fastboot-memory-download = Скачать выбранную память

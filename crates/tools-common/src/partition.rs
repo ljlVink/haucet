@@ -91,6 +91,9 @@ pub fn summarize(image: &Path) -> io::Result<PartitionSummary> {
     if has_magic_at(image, gpt::GPT_HEADER_OFFSET, gpt::GPT_SIGNATURE)? {
         return Ok(PartitionSummary::Gpt(gpt::parse_image(image)?));
     }
+    if gpt::looks_like_storage_head(image)? {
+        return Ok(PartitionSummary::Gpt(gpt::parse_image(image)?));
+    }
     if secimg::probe_image(image)? {
         return Ok(PartitionSummary::SecImage(secimg::parse_image(image)?));
     }

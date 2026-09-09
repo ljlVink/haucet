@@ -99,6 +99,7 @@ pub enum JobOp {
         region: MemoryRegion,
         output: String,
     },
+    FastbootStorageAnalyse {},
     VcomStatus {},
     VcomFlash {
         port: String,
@@ -406,6 +407,7 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
             region,
             output,
         } => fastboot_upload_memory(device, region, Path::new(output)),
+        JobOp::FastbootStorageAnalyse {} => fastboot_storage_analyse(),
         JobOp::VcomStatus {} => vcom_status(),
         JobOp::VcomFlash {
             port,
@@ -752,6 +754,40 @@ fn fastboot_upload_memory(
         ok: true,
         summary: tr!("fastboot-memory-downloaded", "name" => region.name.clone(), "output" => output.display().to_string(), "length" => region.size),
         payload: None,
+    })
+}
+
+fn fastboot_storage_analyse() -> Result<WorkerResult> {
+    let runtime = fastboot_runtime()?;
+    runtime.block_on(async {
+        let devices = hm_fastboot::nusb::devices()
+            .await
+            .context(tr!("enumerate-usb-error"))?;
+        let info = single_fastboot_device(devices)?;
+        let mut fb = hm_fastboot::nusb::NusbFastBoot::from_info(&info)
+            .await
+            .context(tr!("open-fastboot-device-error"))?;
+        let head = fb
+            .read_storage_head()
+            .await
+            .context(tr!("fastboot-storage-head-error"))?;
+        let gpt = common::formats::gpt::parse_storage_head(&head)
+            .context(tr!("fastboot-storage-parse-error"))?;
+        ensure!(
+            !gpt.tables.is_empty(),
+            "{}",
+            tr!("fastboot-storage-no-table")
+        );
+
+        emit_log(&tr!(
+            "fastboot-storage-header",
+            "offset" => format!("0x{:X}", gpt.tables[0].image_offset),
+            "block" => gpt.tables[0].block_size,
+        ));
+        summary_payload(
+            tr!("fastboot-storage-listed", "count" => gpt.partition_count()),
+            gpt,
+        )
     })
 }
 

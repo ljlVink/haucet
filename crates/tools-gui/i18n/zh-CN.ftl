@@ -282,6 +282,21 @@ flash-data-warning = ⚠ 刷写会覆盖设备上的分区数据，请确认分�
 flash-image-hint = 把镜像刷写到目标分区（支持 raw 和 Android sparse 格式）
 status-parse-error = 解析检测结果失败：{$error}
 
+fastboot-storage-title = 存储分析
+fastboot-storage-analyse = 分析设备存储
+fastboot-storage-hint = 读取设备 GPT 并列出所有分区及字节偏移
+fastboot-storage-not-loaded = 尚未分析设备存储。
+fastboot-storage-block-size = 逻辑块大小
+fastboot-storage-start = 起始偏移
+fastboot-storage-end = 结束偏移
+fastboot-storage-head-error = 读取存储头部失败（upload-storage）。
+fastboot-storage-parse-error = 从存储头部解析设备 GPT 失败。
+fastboot-storage-no-table = 设备存储头部没有可读取的 GPT。
+fastboot-storage-header = GPT 头位于 {$offset}，逻辑块大小 {$block} 字节。
+fastboot-storage-listed = 共找到 {$count} 个分区。
+fastboot-storage-payload-error = 解析存储分析结果失败：{$error}
+job-fastboot-storage-analyse = 正在分析设备存储
+
 fastboot-memory-title = 内存读取
 fastboot-memory-get-list = 获取内存列表
 fastboot-memory-download = 下载选中内存

@@ -282,6 +282,21 @@ flash-data-warning = ⚠ Flashing overwrites partition data on the device. Verif
 flash-image-hint = Flash the image to the target partition (raw and Android sparse formats are supported)
 status-parse-error = Unable to parse detection result: {$error}
 
+fastboot-storage-title = Analyse storage
+fastboot-storage-analyse = Analyse device storage
+fastboot-storage-hint = Read the device GPT and list all partitions with byte offsets
+fastboot-storage-not-loaded = Storage has not been analysed yet.
+fastboot-storage-block-size = Logical block size
+fastboot-storage-start = Start offset
+fastboot-storage-end = End offset
+fastboot-storage-head-error = Failed to read the storage head (upload-storage).
+fastboot-storage-parse-error = Failed to parse the device GPT from the storage head.
+fastboot-storage-no-table = The device storage head contains no readable GPT.
+fastboot-storage-header = GPT header at {$offset}, logical block size {$block} bytes.
+fastboot-storage-listed = Found {$count} partitions.
+fastboot-storage-payload-error = Failed to parse the storage analysis result: {$error}
+job-fastboot-storage-analyse = Analysing device storage
+
 fastboot-memory-title = Read memory
 fastboot-memory-get-list = Get memory list
 fastboot-memory-download = Download selected memory

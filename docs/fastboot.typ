@@ -204,11 +204,16 @@ haucet fastboot get-var storage:oeminfo
 # storage:oeminfo: 0000000001000000:0000000006000000
 ```
 
-
 #callout(
-  [`getvar storage` 需要提前调用],
-  [如果不提前调用`getvar storage`直接执行此操作回直接返回`Not Ready`.对于提取指定分区地址, 应使用 `storage:<partition>`.],
+  [`getvar storage` 必须先于 `upload_storage` 调用],
+  [设备端 `upload_storage` 不自己解析 GPT, 而是复用一个缓存的分区表条目（GptAdaEntry 全局变量）来选择读取介质.该缓存只在 `getvar storage:<name>` 触发 `FindPartition` 时才会被填充.未初始化时实测有两种表现：直接返回 `Not Ready`, 或者读到错误的 LUN（首次测试在未初始化状态下从偏移 0 读到的是 xloader 分区的证书链，而非 GPT）.初始化用的分区名只要真实存在即可， `oeminfo` 是常规选择；返回的范围值本身可以丢弃.],
 )
+
+=== 固件侧初始化原理
+
+`FastbootApp.efi` 中 `CmdUploadStorage` 的读取路径：`getvar storage:<name>` 先经 GPT Adapter 协议（GUID `5347B303-75BC-4964-938C-D7CD740D42F4`）执行 `FindPartition(name)`, 把找到的 128 字节 GptAdaEntry（内含该分区所在 LUN 的 BlockIo/Media 信息）写入全局缓存；随后所有 `upload_storage:<offset>:<length>` 都通过该条目的 BlockIo 以 `LBA = offset / block_size` 读盘.
+
+众所周知xloader一定不在同一个lun。所以`haucet fastboot analyse-storage`中是看不到xloader的。
 
 === 参数规则
 
@@ -237,23 +242,25 @@ haucet oeminfo oeminfo.img
 
 == GPT 的 4 KiB 逻辑块
 
-在本次设备的用户 LUN 上, 保护 MBR 位于 LBA 0, GPT 主头位于字节偏移 `0x1000`.这意味着该介质的逻辑块大小是 4096 字节：
+在初始化后的用户 LUN 上, 保护 MBR 位于 LBA 0（实测尾部 `55AA`, 其余字节全零）, GPT 主头位于字节偏移 `0x1000`.这意味着该介质的逻辑块大小是 4096 字节：
 
 #table(
   columns: (1.2fr, 1.15fr, 1.5fr, 2fr),
   fill: (x, y) => if y == 0 { paper },
   table.header([*结构*], [*LBA*], [*字节偏移*], [*实测内容*]),
-  [保护 MBR], [`0`], [`0x0000`], [`0x55AA` 结束标记],
-  [GPT Header], [`1`], [`0x1000`], [`EFI PART`],
-  [Partition Entries], [`2`], [`0x2000`], [`128 × 128` 字节],
+  [保护 MBR], [`0`], [`0x0000`], [仅 `0x55AA` 结束标记有效],
+  [GPT Header], [`1`], [`0x1000`], [`EFI PART`, HeaderCRC/EntryCRC 校验通过],
+  [Partition Entries], [`2`], [`0x2000`], [`128 × 128` 字节, 91 个已用],
+  [空闲间隙], [`0xA`–`0x21`], [`0xA000`–`0x22000`], [全零, 至 first usable LBA],
 )
 
 ```bash
 haucet fastboot get-var storage:oeminfo
-haucet fastboot upload-storage 0x0:0x6000 user-lun-gpt.bin
+haucet fastboot upload-storage 0x0:0x30000 user-lun-head.bin
+haucet fastboot analyse-storage   # 直接解析并打印分区表
 ```
 
-若解析器把逻辑块固定为 512 字节, 它会错误地到 `0x400` 查找分区项, 从而报告“不是 GPT”或得到空表.解析器必须读取介质块大小, 或允许显式指定 `4096`.
+若解析器把逻辑块固定为 512 字节, 它会错误地到 `0x400` 查找分区项, 从而报告“不是 GPT”或得到空表.解析 GPT 头时可用 `header_offset / current_lba` 推断块大小； `haucet` 的 `analyse-storage` 与 `partition-info` 均按此逻辑自动识别.
 
 #pagebreak()
 

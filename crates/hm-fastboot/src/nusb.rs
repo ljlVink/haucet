@@ -431,6 +431,13 @@ impl NusbFastBoot {
         self.upload_data(cmd, size).await
     }
 
+    pub async fn read_storage_head(&mut self) -> Result<Vec<u8>, NusbFastBootError> {
+        // Initialize storage access before uploading; otherwise the device may
+        // reject the request with "Not Ready". The OEMINFO range is not needed.
+        self.get_var("storage:oeminfo").await?;
+        self.upload_storage("0:0x100000", 0x100000).await
+    }
+
     pub async fn extract_part(
         &mut self,
         partition: &str,

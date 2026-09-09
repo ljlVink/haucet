@@ -29,7 +29,7 @@ pub struct FastbootStatusPayload {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 enum FastbootTab {
     #[default]
-    Extract,
+    Storage,
     Memory,
     Flash,
 }
@@ -37,7 +37,7 @@ enum FastbootTab {
 impl FastbootTab {
     fn label(self) -> String {
         match self {
-            Self::Extract => tr!("extract-partition"),
+            Self::Storage => tr!("fastboot-storage-title"),
             Self::Memory => tr!("fastboot-memory-title"),
             Self::Flash => tr!("flash-image"),
         }
@@ -52,6 +52,7 @@ enum PendingOp {
     Flash,
     MemoryList,
     UploadMemory,
+    StorageAnalyse,
 }
 
 #[derive(Debug, Default)]
@@ -69,6 +70,9 @@ pub struct FastbootPage {
     memory_map: Option<MemoryMap>,
     selected_memory: Option<usize>,
     memory_result: Option<ResultView>,
+    storage_gpt: Option<common::formats::gpt::GptInfo>,
+    storage_result: Option<ResultView>,
+    selected_storage_partition: Option<String>,
     pending: Option<PendingOp>,
 }
 
@@ -90,7 +94,7 @@ impl FastbootPage {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tr!("operation")).strong());
                     for tab in [
-                        FastbootTab::Extract,
+                        FastbootTab::Storage,
                         FastbootTab::Memory,
                         FastbootTab::Flash,
                     ] {
@@ -99,7 +103,7 @@ impl FastbootPage {
                 });
                 ui.add_space(10.0);
                 ui.push_id(self.tab, |ui| match self.tab {
-                    FastbootTab::Extract => self.extract_section(ui, app),
+                    FastbootTab::Storage => self.storage_section(ui, app),
                     FastbootTab::Memory => self.memory_section(ui, app),
                     FastbootTab::Flash => self.flash_section(ui, app),
                 });
@@ -225,45 +229,169 @@ impl FastbootPage {
             });
     }
 
-    fn extract_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
+    fn storage_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
+        self.storage_controls(ui, app);
+
+        if let Some(gpt) = &self.storage_gpt
+            && let Some(table) = gpt.tables.first()
+        {
+            egui::Grid::new("fastboot-storage-header-grid")
+                .num_columns(2)
+                .spacing([18.0, 6.0])
+                .show(ui, |ui| {
+                    kv(ui, &tr!("disk-guid"), &table.header.disk_guid);
+                    kv(
+                        ui,
+                        &tr!("fastboot-storage-block-size"),
+                        table.block_size.to_string(),
+                    );
+                    kv(
+                        ui,
+                        &tr!("usable-lba-range"),
+                        format!(
+                            "{} - {}",
+                            crate::util::hex64(table.header.first_usable_lba),
+                            crate::util::hex64(table.header.last_usable_lba)
+                        ),
+                    );
+                    kv(
+                        ui,
+                        &tr!("partition-table-entries"),
+                        tr!(
+                            "entries-each-bytes",
+                            "count" => table.header.partition_entry_count,
+                            "size" => table.header.partition_entry_size,
+                        ),
+                    );
+                });
+            ui.add_space(6.0);
+
+            let partitions = table.partitions.clone();
+            let block_size = table.block_size;
+            let entry_array_offset = table.entry_array_offset;
+            let mut selected = self.selected_storage_partition.clone();
+            egui::ScrollArea::both()
+                .id_salt("fastboot-storage-list")
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("fastboot-storage-grid")
+                        .num_columns(5)
+                        .striped(true)
+                        .spacing([20.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.strong(tr!("name"));
+                            ui.strong(tr!("fastboot-storage-start"));
+                            ui.strong(tr!("fastboot-storage-end"));
+                            ui.strong(tr!("size"));
+                            ui.strong(tr!("type-guid"));
+                            ui.end_row();
+                            for partition in &partitions {
+                                let is_selected =
+                                    selected.as_deref() == Some(partition.name.as_str());
+                                if ui
+                                    .add_enabled(
+                                        !app.job_running(),
+                                        egui::Button::selectable(is_selected, &partition.name),
+                                    )
+                                    .clicked()
+                                {
+                                    selected = Some(partition.name.clone());
+                                    self.extract_partition = partition.name.clone();
+                                }
+                                ui.monospace(crate::util::hex64(partition.first_lba * block_size))
+                                    .on_hover_text(tr!(
+                                        "gpt-partition-tooltip",
+                                        "guid" => partition.unique_guid.clone(),
+                                        "attributes" => format!("0x{:X}", partition.attributes),
+                                        "offset" => format!("0x{:X}", entry_array_offset),
+                                    ));
+                                ui.monospace(crate::util::hex64(
+                                    (partition.last_lba + 1) * block_size,
+                                ));
+                                ui.label(human_size(partition.byte_len(block_size)))
+                                    .on_hover_text(format!("{} B", partition.byte_len(block_size)));
+                                ui.label(
+                                    egui::RichText::new(&partition.type_guid).monospace().weak(),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                });
+            self.selected_storage_partition = selected;
+        } else if self.storage_result.is_none() {
+            ui.label(egui::RichText::new(tr!("fastboot-storage-not-loaded")).weak());
+        }
+
+        ui.add_space(6.0);
+        if let Some(result) = &self.storage_result {
+            let color = if result.ok {
+                egui::Color32::from_rgb(90, 200, 120)
+            } else {
+                egui::Color32::from_rgb(230, 90, 90)
+            };
+            message_box(ui, color, &result.summary);
+        }
+    }
+
+    fn storage_controls(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(tr!("partition-name")).strong());
             ui.add(
                 egui::TextEdit::singleline(&mut self.extract_partition)
                     .hint_text(tr!("extract-partition-name-hint"))
-                    .desired_width(ui.available_width() - 170.0),
+                    .desired_width(360.0),
             );
         });
         ui.add_space(6.0);
 
-        let ready = !app.job_running()
-            && self
-                .status
-                .as_ref()
-                .is_some_and(|status| status.connected && status.devices.len() == 1)
-            && !self.extract_partition.trim().is_empty();
-        if run_button(
-            ui,
-            &tr!("extract-partition"),
-            ready,
-            Some(&tr!("extract-partition-hint")),
-        )
-        .clicked()
-        {
-            let partition = self.extract_partition.trim().to_owned();
-            let suggested = format!("{partition}.img");
-            if let Some(output) = app.pick_save(&tr!("choose-extracted-image"), &suggested) {
-                self.extract_result = None;
-                self.pending = Some(PendingOp::Extract);
-                app.start_job(crate::worker::JobOp::FastbootExtract {
-                    partition,
-                    output: output.display().to_string(),
-                });
+        let connected = self
+            .status
+            .as_ref()
+            .is_some_and(|status| status.connected && status.devices.len() == 1);
+        ui.horizontal(|ui| {
+            if run_button(
+                ui,
+                &tr!("fastboot-storage-analyse"),
+                connected && !app.job_running(),
+                Some(&tr!("fastboot-storage-hint")),
+            )
+            .clicked()
+            {
+                self.clear_storage();
+                self.pending = Some(PendingOp::StorageAnalyse);
+                app.start_job(crate::worker::JobOp::FastbootStorageAnalyse {});
             }
-        }
-        if app.job_running() && self.pending == Some(PendingOp::Extract) {
-            ui.label(egui::RichText::new(tr!("task-running")).weak());
-        }
+
+            let extract_ready =
+                connected && !app.job_running() && !self.extract_partition.trim().is_empty();
+            if run_button(
+                ui,
+                &tr!("extract-partition"),
+                extract_ready,
+                Some(&tr!("extract-partition-hint")),
+            )
+            .clicked()
+            {
+                let partition = self.extract_partition.trim().to_owned();
+                let suggested = format!("{partition}.img");
+                if let Some(output) = app.pick_save(&tr!("choose-extracted-image"), &suggested) {
+                    self.extract_result = None;
+                    self.pending = Some(PendingOp::Extract);
+                    app.start_job(crate::worker::JobOp::FastbootExtract {
+                        partition,
+                        output: output.display().to_string(),
+                    });
+                }
+            }
+            if app.job_running()
+                && matches!(
+                    self.pending,
+                    Some(PendingOp::StorageAnalyse | PendingOp::Extract)
+                )
+            {
+                ui.label(egui::RichText::new(tr!("task-running")).weak());
+            }
+        });
 
         ui.add_space(10.0);
         if let Some(result) = &self.extract_result {
@@ -507,6 +635,9 @@ impl FastbootPage {
                     output: String::new(),
                 });
             }
+            PendingOp::StorageAnalyse => {
+                self.accept_storage_result(result);
+            }
         }
     }
 
@@ -537,6 +668,38 @@ impl FastbootPage {
         self.memory_result = Some(view);
     }
 
+    fn accept_storage_result(&mut self, result: crate::job::JobResult) {
+        let mut view = ResultView {
+            ok: result.ok,
+            summary: result.summary,
+            output: String::new(),
+        };
+        if result.ok {
+            match serde_json::from_value::<common::formats::gpt::GptInfo>(
+                result.payload.unwrap_or_default(),
+            ) {
+                Ok(gpt) if !gpt.tables.is_empty() => {
+                    self.storage_gpt = Some(gpt);
+                }
+                Ok(_) => {
+                    view.ok = false;
+                    view.summary = tr!("fastboot-storage-no-table");
+                }
+                Err(error) => {
+                    view.ok = false;
+                    view.summary =
+                        tr!("fastboot-storage-payload-error", "error" => error.to_string());
+                }
+            }
+        }
+        self.storage_result = Some(view);
+    }
+
+    fn clear_storage(&mut self) {
+        self.storage_gpt = None;
+        self.storage_result = None;
+    }
+
     fn clear_memory(&mut self) {
         self.memory_map = None;
         self.selected_memory = None;
@@ -545,6 +708,7 @@ impl FastbootPage {
 
     fn start_status(&mut self, app: &mut HaucetApp) {
         self.clear_memory();
+        self.clear_storage();
         self.status_error = None;
         self.reboot_result = None;
         self.pending = Some(PendingOp::Status);

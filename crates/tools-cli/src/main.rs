@@ -116,7 +116,9 @@ enum FastbootCommand {
         /// Output image file
         output: PathBuf,
     },
-    /// Flash an image, using ultraflash automatically when supported
+    /// Read the device GPT and print the partition layout
+    #[command(name = "analyse-storage")]
+    AnalyseStorage,
     Flash {
         /// Target partition name, e.g. `updater`, `ramdisk`, or `vendor`
         partition: String,
@@ -576,6 +578,7 @@ fn run_fastboot_command(command: FastbootCommand) -> Result<()> {
             FastbootCommand::ExtractPart { partition, output } => {
                 fastboot::extract_part(&partition, &output).await
             }
+            FastbootCommand::AnalyseStorage => fastboot::analyse_storage().await,
             FastbootCommand::Flash { partition, image } => {
                 fastboot::flash(&partition, &image).await
             }

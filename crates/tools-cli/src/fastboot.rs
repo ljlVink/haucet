@@ -200,6 +200,66 @@ pub async fn extract_part(partition: &str, output: &Path) -> Result<()> {
     Ok(())
 }
 
+pub async fn analyse_storage() -> Result<()> {
+    let mut fb = open_only().await?;
+    let head = fb
+        .read_storage_head()
+        .await
+        .context("failed to read the storage head")?;
+    let info = common::formats::gpt::parse_storage_head(&head)
+        .context("failed to parse the device GPT from the storage head")?;
+
+    for table in &info.tables {
+        let header = &table.header;
+        println!(
+            "GPT table: header at 0x{:X}, entries at 0x{:X}, block size {}",
+            table.image_offset, table.entry_array_offset, table.block_size
+        );
+        println!("  disk guid  = {}", header.disk_guid);
+        println!(
+            "  usable lba = 0x{:X}-0x{:X}",
+            header.first_usable_lba, header.last_usable_lba
+        );
+        println!(
+            "  entries    = {} x {} bytes",
+            header.partition_entry_count, header.partition_entry_size
+        );
+        println!("--- GPT partitions ({}) ---", table.partitions.len());
+        println!(
+            "{:>3}  {:<24} {:>12}  {:>12}  {:>10}",
+            "idx", "name", "start byte", "end byte", "size"
+        );
+        for partition in &table.partitions {
+            let start = partition.first_lba * table.block_size;
+            let end = (partition.last_lba + 1) * table.block_size;
+            println!(
+                "{:>3}  {:<24} 0x{:011X}  0x{:011X}  {:>10}",
+                partition.index,
+                partition.name,
+                start,
+                end,
+                format_size(partition.byte_len(table.block_size)),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {UNITS}", UNITS = UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn parse_hex_u32(value: &str) -> Result<u32, std::num::ParseIntError> {
     let value = value
         .strip_prefix("0x")

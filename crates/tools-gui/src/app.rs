@@ -660,6 +660,7 @@ fn job_label(op: &JobOp) -> String {
         FastbootExtract { .. } => tr!("job-fastboot-extract"),
         FastbootMemoryList { .. } => tr!("job-fastboot-memory-list"),
         FastbootUploadMemory { .. } => tr!("job-fastboot-upload-memory"),
+        FastbootStorageAnalyse { .. } => tr!("job-fastboot-storage-analyse"),
         VcomStatus { .. } => tr!("job-vcom-status"),
         VcomFlash { .. } => tr!("job-vcom-flash"),
     }
