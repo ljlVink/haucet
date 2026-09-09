@@ -1,12 +1,13 @@
+use crate::fastboot_memory::{MemoryDevice, MemoryMap, MemoryRegion, parse_ddrdump};
 use anyhow::{Context, Result, ensure};
 use common::formats::{cpio, erofs, ext4, header::check_fmt_full};
 use common::package::{PackageFormat, UpdateLayout};
 use common::{entropy, fs_util, nvme, oeminfo, package, partition, ramdisk};
-use hisi_vcom::transport::{self, DeviceFilter, SerialVcomDevice};
+use hisi_vcom::transport::{self, SerialVcomDevice};
 use hisi_vcom::vcom;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 pub const WORKER_ENV: &str = "HAUCET_GUI_WORKER";
@@ -90,6 +91,12 @@ pub enum JobOp {
     },
     FastbootExtract {
         partition: String,
+        output: String,
+    },
+    FastbootMemoryList {},
+    FastbootUploadMemory {
+        device: MemoryDevice,
+        region: MemoryRegion,
         output: String,
     },
     VcomStatus {},
@@ -393,6 +400,12 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
             );
             fastboot_extract(partition.trim(), Path::new(output))
         }
+        JobOp::FastbootMemoryList {} => fastboot_memory_list(),
+        JobOp::FastbootUploadMemory {
+            device,
+            region,
+            output,
+        } => fastboot_upload_memory(device, region, Path::new(output)),
         JobOp::VcomStatus {} => vcom_status(),
         JobOp::VcomFlash {
             port,
@@ -403,7 +416,7 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
 }
 
 fn vcom_status() -> Result<WorkerResult> {
-    let ports = transport::list_serial_ports()?
+    let ports = transport::list_vcom_serial_ports()?
         .into_iter()
         .map(|port| {
             serde_json::json!({
@@ -412,20 +425,13 @@ fn vcom_status() -> Result<WorkerResult> {
             })
         })
         .collect::<Vec<_>>();
-    let filter = DeviceFilter {
-        vid: Some(0x12D1),
-        ..Default::default()
-    };
-    let usb = transport::list_candidates(&filter)?;
     let serial_count = ports.len();
-    let usb_count = usb.len();
 
     Ok(WorkerResult {
         ok: true,
-        summary: tr!("worker-vcom-status", "ports" => serial_count, "usb" => usb_count),
+        summary: tr!("worker-vcom-status", "ports" => serial_count),
         payload: Some(serde_json::json!({
             "ports": ports,
-            "usb": usb,
         })),
     })
 }
@@ -662,6 +668,90 @@ fn fastboot_extract(partition: &str, output: &Path) -> Result<WorkerResult> {
             ),
             payload: None,
         })
+    })
+}
+
+async fn read_memory_map(fb: &mut hm_fastboot::nusb::NusbFastBoot) -> Result<Vec<MemoryRegion>> {
+    let lines = fb
+        .oem("ddrdump")
+        .await
+        .context(tr!("fastboot-memory-list-error"))?;
+    for line in &lines {
+        emit_log(line);
+    }
+    parse_ddrdump(&lines.join("\n"))
+}
+
+fn fastboot_memory_list() -> Result<WorkerResult> {
+    let runtime = fastboot_runtime()?;
+    runtime.block_on(async {
+        let devices = hm_fastboot::nusb::devices()
+            .await
+            .context(tr!("enumerate-usb-error"))?;
+        let info = single_fastboot_device(devices)?;
+        let mut fb = hm_fastboot::nusb::NusbFastBoot::from_info(&info)
+            .await
+            .context(tr!("open-fastboot-device-error"))?;
+        let regions = read_memory_map(&mut fb).await?;
+        summary_payload(
+            tr!("fastboot-memory-listed", "count" => regions.len()),
+            MemoryMap {
+                device: MemoryDevice::from_info(&info),
+                regions,
+            },
+        )
+    })
+}
+
+fn fastboot_upload_memory(
+    device: &MemoryDevice,
+    region: &MemoryRegion,
+    output: &Path,
+) -> Result<WorkerResult> {
+    region.validate()?;
+    let runtime = fastboot_runtime()?;
+    let mut fb = runtime.block_on(async {
+        let devices = hm_fastboot::nusb::devices()
+            .await
+            .context(tr!("enumerate-usb-error"))?;
+        let info = single_fastboot_device(devices)?;
+        ensure!(
+            &MemoryDevice::from_info(&info) == device,
+            "{}",
+            tr!("fastboot-memory-device-changed")
+        );
+        let mut fb = hm_fastboot::nusb::NusbFastBoot::from_info(&info)
+            .await
+            .context(tr!("open-fastboot-device-error"))?;
+        ensure!(
+            read_memory_map(&mut fb).await?.contains(region),
+            "{}",
+            tr!("fastboot-memory-region-changed")
+        );
+        Ok::<_, anyhow::Error>(fb)
+    })?;
+
+    // Keep memory usage bounded and publish only a complete download. A unique
+    // worker label also allows retrying after the worker was forcibly cancelled.
+    fs_util::atomic_write(output, &format!("memory-{}", std::process::id()), |writer| {
+        runtime.block_on(async {
+            let mut written = 0u64;
+            for (address, length) in region.chunks() {
+                let params = format!("0x{address:x}:0x{length:x}");
+                let data = fb.upload_memory(&params, length).await?;
+                ensure!(data.len() == length as usize, "{}", tr!("fastboot-memory-short-read"));
+                writer.write_all(&data)?;
+                written += u64::from(length);
+                emit_log(&tr!("fastboot-memory-progress", "written" => written, "total" => region.size));
+            }
+            Ok(())
+        })
+    })
+    .with_context(|| tr!("fastboot-memory-download-error", "name" => region.name.clone(), "output" => output.display().to_string()))?;
+    Ok(WorkerResult {
+        ok: true,
+        summary: tr!("fastboot-memory-downloaded", "name" => region.name.clone(), "output" => output.display().to_string(), "length" => region.size),
+        payload: None,
     })
 }
 

@@ -13,6 +13,8 @@ use serialport::{ClearBuffer, SerialPort};
 use crate::error::Error;
 
 const VCOM_MARKERS: &[&str] = &["DBAdapter", "USB COM", "PCUI", "PC UI", "VCOM"];
+const HUAWEI_VID: u16 = 0x12D1;
+const HUAWEI_USB_COM_PID: u16 = 0x3609;
 
 const DISCARD_MAX_READS: usize = 64;
 
@@ -136,6 +138,30 @@ pub struct SerialUsbInfo {
     pub serial_number: Option<String>,
     pub manufacturer: Option<String>,
     pub product: Option<String>,
+}
+
+impl SerialPortCandidate {
+    fn is_vcom(&self) -> bool {
+        let Some(usb) = &self.usb else {
+            return false;
+        };
+        usb.vid == HUAWEI_VID
+            && (usb.pid == HUAWEI_USB_COM_PID
+                || usb.product.as_deref().is_some_and(|product| {
+                    let product = product.to_ascii_lowercase();
+                    VCOM_MARKERS
+                        .iter()
+                        .any(|marker| product.contains(&marker.to_ascii_lowercase()))
+                }))
+    }
+}
+
+/// List recognized Huawei VCOM serial ports without opening or probing them.
+pub fn list_vcom_serial_ports() -> Result<Vec<SerialPortCandidate>, Error> {
+    Ok(list_serial_ports()?
+        .into_iter()
+        .filter(SerialPortCandidate::is_vcom)
+        .collect())
 }
 
 pub fn list_serial_ports() -> Result<Vec<SerialPortCandidate>, Error> {

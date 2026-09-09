@@ -5,6 +5,7 @@ mod i18n;
 
 mod app;
 mod detect;
+mod fastboot_memory;
 mod fonts;
 mod job;
 mod pages;

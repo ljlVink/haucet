@@ -1,6 +1,7 @@
 use crate::app::HaucetApp;
+use crate::fastboot_memory::MemoryMap;
 use crate::pages::{Page, ResultView, run_button};
-use crate::util::{kv, message_box, section};
+use crate::util::{human_size, kv, message_box, section};
 use eframe::egui;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -31,6 +32,8 @@ enum PendingOp {
     Reboot,
     Extract,
     Flash,
+    MemoryList,
+    UploadMemory,
 }
 
 #[derive(Debug, Default)]
@@ -44,6 +47,9 @@ pub struct FastbootPage {
     pub extract_result: Option<ResultView>,
     pub result: Option<ResultView>,
     pub reboot_result: Option<ResultView>,
+    memory_map: Option<MemoryMap>,
+    selected_memory: Option<usize>,
+    memory_result: Option<ResultView>,
     pending: Option<PendingOp>,
 }
 
@@ -63,6 +69,8 @@ impl FastbootPage {
                 self.status_section(ui, app);
                 ui.add_space(10.0);
                 self.extract_section(ui, app);
+                ui.add_space(10.0);
+                self.memory_section(ui, app);
                 ui.add_space(10.0);
                 self.flash_section(ui, app);
                 ui.add_space(20.0);
@@ -102,7 +110,7 @@ impl FastbootPage {
                 let text = match self.pending {
                     Some(PendingOp::Status) => tr!("detecting"),
                     Some(PendingOp::Reboot) => tr!("rebooting"),
-                    Some(PendingOp::Extract | PendingOp::Flash) | None => tr!("task-running"),
+                    _ => tr!("task-running"),
                 };
                 ui.label(egui::RichText::new(text).weak());
             }
@@ -230,6 +238,97 @@ impl FastbootPage {
 
         ui.add_space(10.0);
         if let Some(result) = &self.extract_result {
+            let color = if result.ok {
+                egui::Color32::from_rgb(90, 200, 120)
+            } else {
+                egui::Color32::from_rgb(230, 90, 90)
+            };
+            message_box(ui, color, &result.summary);
+        }
+    }
+
+    fn memory_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
+        section(ui, &tr!("fastboot-memory-title"));
+        let ready = !app.job_running()
+            && self
+                .status
+                .as_ref()
+                .is_some_and(|status| status.connected && status.devices.len() == 1);
+        ui.horizontal(|ui| {
+            if run_button(ui, &tr!("fastboot-memory-get-list"), ready, None).clicked() {
+                self.clear_memory();
+                self.pending = Some(PendingOp::MemoryList);
+                app.start_job(crate::worker::JobOp::FastbootMemoryList {});
+            }
+            let selected = self.memory_map.as_ref().and_then(|map| {
+                map.regions
+                    .get(self.selected_memory?)
+                    .map(|region| (map.device.clone(), region.clone()))
+            });
+            if run_button(
+                ui,
+                &tr!("fastboot-memory-download"),
+                ready && selected.is_some(),
+                None,
+            )
+            .clicked()
+                && let Some((device, region)) = selected
+                && let Some(output) =
+                    app.pick_save(&tr!("fastboot-memory-save"), &region.suggested_filename())
+            {
+                self.memory_result = None;
+                self.pending = Some(PendingOp::UploadMemory);
+                app.start_job(crate::worker::JobOp::FastbootUploadMemory {
+                    device,
+                    region,
+                    output: output.display().to_string(),
+                });
+            }
+        });
+        ui.add_space(6.0);
+
+        if let Some(map) = &self.memory_map {
+            egui::ScrollArea::both()
+                .id_salt("fastboot-memory-list")
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("fastboot-memory-grid")
+                        .num_columns(3)
+                        .striped(true)
+                        .spacing([20.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.strong(tr!("name"));
+                            ui.strong(tr!("fastboot-memory-base"));
+                            ui.strong(tr!("fastboot-memory-size"));
+                            ui.end_row();
+                            for (index, region) in map.regions.iter().enumerate() {
+                                if ui
+                                    .add_enabled(
+                                        !app.job_running(),
+                                        egui::Button::selectable(
+                                            self.selected_memory == Some(index),
+                                            &region.name,
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.selected_memory = Some(index);
+                                }
+                                ui.monospace(format!("0x{:016X}", region.base));
+                                ui.monospace(format!(
+                                    "0x{:08X} ({})",
+                                    region.size,
+                                    human_size(u64::from(region.size)),
+                                ))
+                                .on_hover_text(format!("{} B", region.size));
+                                ui.end_row();
+                            }
+                        });
+                });
+        } else if self.memory_result.is_none() {
+            ui.label(egui::RichText::new(tr!("fastboot-memory-not-loaded")).weak());
+        }
+        if let Some(result) = &self.memory_result {
             let color = if result.ok {
                 egui::Color32::from_rgb(90, 200, 120)
             } else {
@@ -367,10 +466,58 @@ impl FastbootPage {
                     output: String::new(),
                 });
             }
+            PendingOp::MemoryList => {
+                self.accept_memory_list(result);
+            }
+            PendingOp::UploadMemory => {
+                if !result.ok {
+                    self.memory_map = None;
+                    self.selected_memory = None;
+                }
+                self.memory_result = Some(ResultView {
+                    ok: result.ok,
+                    summary: result.summary,
+                    output: String::new(),
+                });
+            }
         }
     }
 
+    fn accept_memory_list(&mut self, result: crate::job::JobResult) {
+        self.clear_memory();
+        let mut view = ResultView {
+            ok: result.ok,
+            summary: result.summary,
+            output: String::new(),
+        };
+        if result.ok {
+            match serde_json::from_value::<MemoryMap>(result.payload.unwrap_or_default()) {
+                Ok(map) if !map.regions.is_empty() => {
+                    self.selected_memory = Some(0);
+                    self.memory_map = Some(map);
+                }
+                Ok(_) => {
+                    view.ok = false;
+                    view.summary = tr!("fastboot-memory-empty");
+                }
+                Err(error) => {
+                    view.ok = false;
+                    view.summary =
+                        tr!("fastboot-memory-payload-error", "error" => error.to_string());
+                }
+            }
+        }
+        self.memory_result = Some(view);
+    }
+
+    fn clear_memory(&mut self) {
+        self.memory_map = None;
+        self.selected_memory = None;
+        self.memory_result = None;
+    }
+
     fn start_status(&mut self, app: &mut HaucetApp) {
+        self.clear_memory();
         self.status_error = None;
         self.reboot_result = None;
         self.pending = Some(PendingOp::Status);
@@ -378,6 +525,7 @@ impl FastbootPage {
     }
 
     fn start_reboot(&mut self, app: &mut HaucetApp) {
+        self.clear_memory();
         self.reboot_result = None;
         self.pending = Some(PendingOp::Reboot);
         app.start_job(crate::worker::JobOp::FastbootReboot {});

@@ -658,6 +658,8 @@ fn job_label(op: &JobOp) -> String {
         FastbootReboot { .. } => tr!("job-fastboot-reboot"),
         FastbootFlash { .. } => tr!("job-fastboot-flash"),
         FastbootExtract { .. } => tr!("job-fastboot-extract"),
+        FastbootMemoryList { .. } => tr!("job-fastboot-memory-list"),
+        FastbootUploadMemory { .. } => tr!("job-fastboot-upload-memory"),
         VcomStatus { .. } => tr!("job-vcom-status"),
         VcomFlash { .. } => tr!("job-vcom-flash"),
     }
@@ -678,6 +680,9 @@ fn result_owner(op: &JobOp, current: Page) -> ResultOwner {
         | JobOp::RamdiskPatch { .. }
         | JobOp::RamdiskProbe { .. } => ResultOwner::Image(ImageKind::Ramdisk),
         JobOp::PartitionInfo { .. } => ResultOwner::Image(ImageKind::Partition),
+        JobOp::FastbootMemoryList { .. } | JobOp::FastbootUploadMemory { .. } => {
+            ResultOwner::Page(Page::Fastboot)
+        }
         _ => ResultOwner::Page(current),
     }
 }

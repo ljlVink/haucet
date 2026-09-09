@@ -151,7 +151,7 @@ enum FastbootCommand {
 
 #[derive(Debug, Subcommand)]
 enum VcomCommand {
-    /// List available VCOM serial and USB devices
+    /// List recognized Huawei VCOM serial ports
     Devices,
     /// Upload a loader binary to a VCOM port at an address
     Flash {
