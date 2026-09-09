@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use hisi_vcom::transport::{self, DeviceFilter, SerialVcomDevice};
+use hisi_vcom::transport::{self, SerialVcomDevice};
 use hisi_vcom::vcom;
 use std::cell::Cell;
 use std::fs;
@@ -10,18 +10,11 @@ use std::path::Path;
 pub fn devices() -> Result<()> {
     let mut found = false;
 
-    for port in transport::list_serial_ports().context("failed to enumerate serial ports")? {
+    for port in
+        transport::list_vcom_serial_ports().context("failed to enumerate VCOM serial ports")?
+    {
         found = true;
         println!("{:<8}  {}", port.name, port.description);
-    }
-
-    let filter = DeviceFilter {
-        vid: Some(0x12D1),
-        ..Default::default()
-    };
-    for line in transport::list_candidates(&filter).context("failed to enumerate USB devices")? {
-        found = true;
-        println!("USB      {line}");
     }
 
     if !found {

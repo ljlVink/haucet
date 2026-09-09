@@ -16,8 +16,6 @@ pub struct VcomPortInfo {
 pub struct VcomStatusPayload {
     #[serde(default)]
     pub ports: Vec<VcomPortInfo>,
-    #[serde(default)]
-    pub usb: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +85,7 @@ impl VcomPage {
             return;
         };
 
-        if status.ports.is_empty() && status.usb.is_empty() {
+        if status.ports.is_empty() {
             message_box(
                 ui,
                 egui::Color32::from_rgb(230, 170, 40),
@@ -117,14 +115,6 @@ impl VcomPage {
                             }
                         });
                 });
-        }
-
-        if !status.usb.is_empty() {
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(tr!("huawei-usb-devices")).weak());
-            for device in &status.usb {
-                ui.label(egui::RichText::new(device).monospace().size(12.0));
-            }
         }
     }
 
