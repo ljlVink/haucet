@@ -248,6 +248,8 @@ impl OemInfoPage {
                     tr!("discarded-header-warning", "count" => summary.discarded_headers),
                 );
             }
+
+            render_overview(ui, &common::oeminfo::overview(summary));
         }
 
         ui.add_space(12.0);
@@ -930,6 +932,91 @@ fn render_blocks_table(
                 }
             });
         });
+}
+
+fn render_overview(ui: &mut egui::Ui, overview: &common::oeminfo::OemInfoOverview) {
+    ui.add_space(10.0);
+    section(ui, &tr!("oeminfo-identity-section"));
+    egui::Grid::new("oeminfo-overview-grid")
+        .num_columns(4)
+        .spacing([18.0, 7.0])
+        .show(ui, |ui| {
+            overview_value(
+                ui,
+                &tr!("oeminfo-product-model"),
+                overview.product_model.as_deref(),
+            );
+            overview_value(
+                ui,
+                &tr!("oeminfo-base-version"),
+                overview.base_version.as_deref(),
+            );
+            ui.end_row();
+            overview_value(
+                ui,
+                &tr!("oeminfo-full-version"),
+                overview.full_version.as_deref(),
+            );
+            overview_value(
+                ui,
+                &tr!("oeminfo-base-component"),
+                overview.base_component.as_deref(),
+            );
+            ui.end_row();
+            overview_value(
+                ui,
+                &tr!("oeminfo-cust-version"),
+                overview.cust_version.as_deref(),
+            );
+            overview_value(
+                ui,
+                &tr!("oeminfo-preload-version"),
+                overview.preload_version.as_deref(),
+            );
+            ui.end_row();
+            overview_value(
+                ui,
+                &tr!("oeminfo-device-certificate"),
+                overview
+                    .device_certificate
+                    .map(|present| {
+                        if present {
+                            tr!("oeminfo-certificate-present")
+                        } else {
+                            tr!("oeminfo-certificate-absent")
+                        }
+                    })
+                    .as_deref(),
+            );
+            ui.end_row();
+            for (id, sub_id, text) in &overview.other_versions {
+                overview_value(
+                    ui,
+                    &tr!("oeminfo-other-version", "id" => id, "subid" => sub_id),
+                    Some(text.as_str()),
+                );
+                ui.label("");
+                ui.end_row();
+            }
+        });
+}
+
+fn overview_value(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
+    ui.label(egui::RichText::new(label).weak());
+    match value {
+        Some(text) => {
+            ui.label(egui::RichText::new(text).monospace());
+            ui.label("");
+        }
+        None => {
+            ui.label(
+                egui::RichText::new(tr!("oeminfo-value-missing"))
+                    .weak()
+                    .italics(),
+            );
+            ui.label("");
+        }
+    }
 }
 
 fn render_block_details(ui: &mut egui::Ui, block: &OemInfoBlockSummary) {

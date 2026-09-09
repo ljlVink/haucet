@@ -28,6 +28,9 @@ pub(crate) struct HaucetApp {
     pub settings: Settings,
     pub font_loaded: bool,
     pub logo: Option<egui::TextureHandle>,
+    vibrancy_enabled: bool,
+    transparent_window_at_startup: bool,
+    native_theme: Option<egui::Theme>,
     dialog: Option<AppDialog>,
     results: ResultStore,
 }
@@ -71,6 +74,7 @@ impl ResultStore {
 impl HaucetApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
+        settings: Settings,
         font_loaded: bool,
         logo_rgba: Option<(Vec<u8>, [usize; 2])>,
     ) -> Self {
@@ -84,8 +88,13 @@ impl HaucetApp {
                     .load_texture("haucet-logo", image, egui::TextureOptions::LINEAR),
             )
         });
-        let settings = Settings::load();
-        i18n::set_language(settings.language);
+        cc.egui_ctx.set_theme(if settings.dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        let transparent_window_at_startup = settings.transparent_window;
+        let vibrancy_enabled = transparent_window_at_startup && crate::vibrancy::apply(cc);
         Self {
             current: Page::Home,
             home: pages::home::HomePage::default(),
@@ -103,6 +112,9 @@ impl HaucetApp {
             settings,
             font_loaded,
             logo,
+            vibrancy_enabled,
+            transparent_window_at_startup,
+            native_theme: None,
             dialog: None,
             results: ResultStore::default(),
         }
@@ -110,22 +122,38 @@ impl HaucetApp {
 }
 
 impl eframe::App for HaucetApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
+        let theme = ctx.theme();
+        if self.native_theme != Some(theme) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(match theme {
+                egui::Theme::Dark => egui::SystemTheme::Dark,
+                egui::Theme::Light => egui::SystemTheme::Light,
+            }));
+            self.native_theme = Some(theme);
+        }
+    }
 
-        egui::SidePanel::left("nav")
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if self.vibrancy_enabled {
+            // Avoid tinting only the client area on top of the native backdrop.
+            ui.visuals_mut().panel_fill = egui::Color32::TRANSPARENT;
+        }
+
+        egui::Panel::left("nav")
             .resizable(false)
-            .exact_width(200.0)
-            .show(ctx, |ui| self.nav_panel(ui));
-        egui::TopBottomPanel::bottom("log-panel").show(ctx, |ui| self.log_panel(ui));
-        self.page_header_panel(ctx);
-        egui::CentralPanel::default().show(ctx, |ui| self.central(ui));
+            .exact_size(200.0)
+            .show_inside(ui, |ui| self.nav_panel(ui));
+        egui::Panel::bottom("log-panel").show_inside(ui, |ui| self.log_panel(ui));
+        self.page_header_panel(ui);
+        egui::CentralPanel::default().show_inside(ui, |ui| self.central(ui));
 
         if !self.font_loaded {
             egui::Area::new("font-warning".into())
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 46.0))
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     egui::Frame::group(ui.style())
                         .fill(egui::Color32::from_rgb(90, 60, 10).gamma_multiply(0.9))
                         .inner_margin(egui::Margin::same(10))
@@ -138,10 +166,18 @@ impl eframe::App for HaucetApp {
                 });
         }
 
-        self.show_dialog(ctx);
+        self.show_dialog(&ctx);
 
         if self.job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.vibrancy_enabled {
+            egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
+        } else {
+            visuals.panel_fill.to_normalized_gamma_f32()
         }
     }
 
@@ -365,10 +401,8 @@ impl HaucetApp {
             AppDialog::Settings => ("settings-dialog", tr!("settings-heading")),
         };
         let response = egui::Modal::new(egui::Id::new(id))
-            .frame(egui::Frame::popup(&ctx.style()).inner_margin(20))
+            .frame(egui::Frame::popup(&ctx.global_style()).inner_margin(20))
             .show(ctx, |ui| {
-                ui.set_width(400.0);
-                apply_content_text_style(ui);
                 ui.horizontal(|ui| {
                     if let Some(logo) = &self.logo {
                         ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(48.0, 48.0)));
@@ -410,6 +444,41 @@ impl HaucetApp {
                                 ctx.request_repaint();
                             }
                         });
+                        ui.add_space(8.0);
+                        let transparency_changed = ui
+                            .add_enabled(
+                                crate::vibrancy::SUPPORTED,
+                                egui::Checkbox::new(
+                                    &mut self.settings.transparent_window,
+                                    tr!("settings-transparent-window"),
+                                ),
+                            )
+                            .changed();
+                        if transparency_changed && self.settings.transparent_window {
+                            self.settings.dark = false;
+                        }
+                        let dark_changed = ui
+                            .add_enabled(
+                                !self.settings.transparent_window && !self.vibrancy_enabled,
+                                egui::Checkbox::new(
+                                    &mut self.settings.dark,
+                                    tr!("settings-dark-mode"),
+                                ),
+                            )
+                            .on_disabled_hover_text(tr!("settings-dark-mode-unavailable"))
+                            .changed();
+                        if transparency_changed || dark_changed {
+                            ctx.set_theme(if self.settings.dark {
+                                egui::Theme::Dark
+                            } else {
+                                egui::Theme::Light
+                            });
+                            self.settings.save();
+                            ctx.request_repaint();
+                        }
+                        if self.settings.transparent_window != self.transparent_window_at_startup {
+                            ui.label(tr!("settings-transparency-restart"));
+                        }
                     }
                 }
                 ui.add_space(20.0);
@@ -457,7 +526,7 @@ impl HaucetApp {
         }
     }
 
-    fn page_header_panel(&self, ctx: &egui::Context) {
+    fn page_header_panel(&self, ui: &mut egui::Ui) {
         let Some((title, description)) = self.current.header() else {
             return;
         };
@@ -467,11 +536,11 @@ impl HaucetApp {
                 ResultOwner::Image(_) => self.current == Page::Images,
             };
 
-        egui::TopBottomPanel::top("page-header")
+        egui::Panel::top("page-header")
             .resizable(false)
-            .exact_height(68.0)
+            .exact_size(68.0)
             .show_separator_line(true)
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 apply_content_text_style(ui);
                 pages::page_header(ui, &title, &description, busy);
             });

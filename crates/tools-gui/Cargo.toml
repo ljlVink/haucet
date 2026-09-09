@@ -14,7 +14,7 @@ anyhow.workspace = true
 common = { path = "../tools-common" }
 eframe.workspace = true
 egui.workspace = true
-egui_extras = { version = "0.32", default-features = false, features = ["image"] }
+egui_extras = { version = "0.34", default-features = false, features = ["image"] }
 fluent-bundle = "0.16"
 flate2.workspace = true
 hisi-vcom = { path = "../hisi-vcom" }
@@ -35,6 +35,9 @@ winresource = { version = "0.1", default-features = false }
 [target.'cfg(unix)'.dependencies]
 eframe = { workspace = true, features = ["x11"] }
 libc.workspace = true
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+window-vibrancy = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

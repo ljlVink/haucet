@@ -38,8 +38,8 @@ clap = { version = "4.5", features = ["derive"] }
 crc32c = "0.6"
 ext4-metadata = { package = "ext4", version = "0.9.0" }
 ext4-view = { version = "0.9.3", features = ["std"] }
-eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
-egui = "0.32"
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.34"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 fs2 = "0.4"
 hex = "0.4"

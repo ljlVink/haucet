@@ -10,6 +10,7 @@ mod job;
 mod pages;
 mod settings;
 mod util;
+mod vibrancy;
 mod worker;
 
 use app::HaucetApp;
@@ -22,12 +23,15 @@ fn main() -> eframe::Result<()> {
         std::process::exit(worker::run_worker());
     }
 
+    let settings = settings::Settings::load();
+    i18n::set_language(settings.language);
     let (icon, logo_rgba) = load_logo();
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1400.0, 1000.0])
         .with_min_inner_size([980.0, 640.0])
         .with_title(tr!("app-title-idle"))
+        .with_transparent(settings.transparent_window)
         .with_decorations(true);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(Arc::new(icon));
@@ -40,9 +44,14 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Haucet",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             let font_loaded = fonts::install_cjk_font(&cc.egui_ctx);
-            Ok(Box::new(HaucetApp::new(cc, font_loaded, logo_rgba)))
+            Ok(Box::new(HaucetApp::new(
+                cc,
+                settings,
+                font_loaded,
+                logo_rgba,
+            )))
         }),
     )
 }

@@ -418,6 +418,34 @@ fn run_oeminfo_command(image: PathBuf, preview: bool) -> Result<()> {
         "layouts: {} standard, {} compact, {} reused",
         summary.standard_blocks, summary.compact_blocks, summary.reused_blocks
     );
+    let overview = oeminfo::overview(&summary);
+    if let Some(model) = overview.product_model.as_deref() {
+        println!("model: {model}");
+    }
+    if let Some(version) = overview.base_version.as_deref() {
+        println!("base version: {version}");
+    }
+    if let Some(version) = overview.full_version.as_deref() {
+        println!("full version: {version}");
+    }
+    if let Some(version) = overview.base_component.as_deref() {
+        println!("base component (86): {version}");
+    }
+    if let Some(version) = overview.cust_version.as_deref() {
+        println!("cust version (80): {version}");
+    }
+    if let Some(version) = overview.preload_version.as_deref() {
+        println!("preload version (82): {version}");
+    }
+    if let Some(present) = overview.device_certificate {
+        println!(
+            "device certificate (2601/2603): {}",
+            if present { "present" } else { "absent" }
+        );
+    }
+    for (id, sub_id, text) in &overview.other_versions {
+        println!("version-like ({id}/{sub_id}): {text}");
+    }
     if summary.discarded_headers != 0 {
         println!(
             "warning: discarded {} of {} OEM_INFO header candidates",

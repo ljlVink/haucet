@@ -9,14 +9,26 @@ pub struct Settings {
     pub last_dir: Option<String>,
     pub recent: Vec<String>,
     pub language: Language,
+    #[serde(default = "default_dark")]
+    pub dark: bool,
+    pub transparent_window: bool,
+}
+
+fn default_dark() -> bool {
+    true
 }
 
 impl Settings {
     pub fn load() -> Self {
-        std::fs::read_to_string(path())
+        let mut settings: Self = std::fs::read_to_string(path())
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings.transparent_window &= crate::vibrancy::SUPPORTED;
+        if settings.transparent_window {
+            settings.dark = false;
+        }
+        settings
     }
 
     pub fn save(&self) {
