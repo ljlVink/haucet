@@ -1,8 +1,7 @@
 use crate::app::HaucetApp;
 use crate::pages::{Page, ResultView, run_button};
 use crate::util::{
-    human_size, message_box, open_in_file_manager, section, sibling_output_path,
-    update_derived_path,
+    human_size, open_in_file_manager, section, sibling_output_path, update_derived_path,
 };
 use common::package::{PackageFormat, PackageIndex, UpdateLayout};
 use eframe::egui;
@@ -25,7 +24,6 @@ pub struct PackagePage {
 
     pub index: Option<PackageIndex>,
     pub checked: Vec<bool>,
-    pub inspect_message: Option<String>,
     pub result: Option<ResultView>,
     inspect_pending: bool,
     input_initialized: bool,
@@ -43,8 +41,6 @@ impl PackagePage {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
-
         if !self.input_initialized {
             self.input_initialized = true;
             if !self.input.trim().is_empty() {
@@ -175,10 +171,6 @@ impl PackagePage {
 
                 ui.add_space(8.0);
                 self.show_result(ui);
-                if let Some(message) = &self.inspect_message {
-                    message_box(ui, egui::Color32::from_rgb(90, 170, 255), message);
-                    ui.add_space(6.0);
-                }
                 if let Some(index) = self.index.clone() {
                     ui.horizontal(|ui| {
                         ui.strong(format!("{}:", tr!("package-format")));
@@ -214,7 +206,6 @@ impl PackagePage {
     fn clear_inspection(&mut self) {
         self.index = None;
         self.checked.clear();
-        self.inspect_message = None;
         self.result = None;
     }
 
@@ -233,7 +224,7 @@ impl PackagePage {
         });
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_result(Page::Package) else {
             return;
         };
@@ -246,7 +237,7 @@ impl PackagePage {
                     return;
                 }
                 if !result.ok {
-                    self.inspect_message = Some(result.summary.clone());
+                    app.notify_result(&result);
                     self.result = Some(ResultView {
                         ok: false,
                         summary: result.summary,
@@ -261,7 +252,7 @@ impl PackagePage {
                     Some(index) => index,
                     None => {
                         let summary = tr!("package-index-invalid");
-                        self.inspect_message = Some(summary.clone());
+                        app.notify(egui_notify::ToastLevel::Error, summary.clone());
                         self.result = Some(ResultView {
                             ok: false,
                             summary,
@@ -280,11 +271,14 @@ impl PackagePage {
                     .iter()
                     .map(|component| component.component_type == 0)
                     .collect();
-                self.inspect_message = Some(tr!(
-                    "package-component-count",
-                    "components" => index.components.len(),
-                    "images" => image_count,
-                ));
+                app.notify(
+                    egui_notify::ToastLevel::Info,
+                    tr!(
+                        "package-component-count",
+                        "components" => index.components.len(),
+                        "images" => image_count,
+                    ),
+                );
                 if index.format == PackageFormat::UpdateApp {
                     self.layout = UpdateLayout::Auto;
                     self.all_erofs = false;
@@ -295,6 +289,7 @@ impl PackagePage {
                 if input != self.input.trim() {
                     return;
                 }
+                app.notify_result(&result);
                 self.result = Some(ResultView {
                     ok: result.ok,
                     summary: result.summary,
@@ -443,13 +438,11 @@ impl PackagePage {
             return;
         };
         ui.add_space(6.0);
-        if result.ok {
-            message_box(ui, egui::Color32::from_rgb(90, 200, 120), &result.summary);
-            if !result.output.is_empty() && ui.button(tr!("open-output-directory")).clicked() {
-                open_in_file_manager(std::path::Path::new(&result.output));
-            }
-        } else {
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), &result.summary);
+        if result.ok
+            && !result.output.is_empty()
+            && ui.button(tr!("open-output-directory")).clicked()
+        {
+            open_in_file_manager(std::path::Path::new(&result.output));
         }
     }
 }

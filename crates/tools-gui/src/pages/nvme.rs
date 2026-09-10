@@ -1,6 +1,6 @@
 use crate::app::HaucetApp;
 use crate::pages::{Page, ResultView, run_button};
-use crate::util::{message_box, open_in_file_manager};
+use crate::util::open_in_file_manager;
 use common::nvme::{NveBlockSummary, NveImageSummary, NveItemSummary};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -37,8 +37,6 @@ pub struct NvmePage {
 
 impl NvmePage {
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
-
         egui::ScrollArea::vertical()
             .id_salt("nvme-scroll")
             .auto_shrink([false, false])
@@ -133,14 +131,6 @@ impl NvmePage {
         );
         summary_row(ui, &tr!("valid-entries"), &entries, &version, None);
         summary_row(ui, "CRC32C", &crc_value, &crc_detail, crc_color);
-        if summary.crc_invalid != 0 {
-            ui.add_space(8.0);
-            message_box(
-                ui,
-                egui::Color32::from_rgb(225, 155, 60),
-                tr!("crc-invalid-warning"),
-            );
-        }
     }
 
     fn render_editor(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp, summary: &NveImageSummary) {
@@ -483,12 +473,6 @@ impl NvmePage {
             return;
         };
         ui.add_space(6.0);
-        let color = if result.ok {
-            egui::Color32::from_rgb(90, 200, 120)
-        } else {
-            egui::Color32::from_rgb(230, 90, 90)
-        };
-        message_box(ui, color, &result.summary);
         if result.ok
             && !result.output.is_empty()
             && ui.button(tr!("open-backup-location")).clicked()
@@ -497,11 +481,12 @@ impl NvmePage {
         }
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_result(Page::Nvme) else {
             return;
         };
         if !result.ok {
+            app.notify_result(&result);
             self.result = Some(ResultView {
                 ok: false,
                 summary: result.summary,
@@ -512,6 +497,7 @@ impl NvmePage {
         }
 
         if self.pending_edit {
+            app.notify_result(&result);
             self.pending_edit = false;
             let edit = result.payload.and_then(|payload| {
                 serde_json::from_value::<common::nvme::NveEditResult>(payload).ok()
@@ -525,6 +511,9 @@ impl NvmePage {
         } else if let Some(payload) = result.payload {
             match serde_json::from_value::<NveImageSummary>(payload) {
                 Ok(summary) => {
+                    if summary.crc_invalid != 0 {
+                        app.notify(egui_notify::ToastLevel::Warning, tr!("crc-invalid-warning"));
+                    }
                     if self.key.trim().is_empty() {
                         if let Some(item) = summary.items.first() {
                             self.select_item(item);
@@ -546,6 +535,10 @@ impl NvmePage {
                     }
                 }
                 Err(error) => {
+                    app.notify(
+                        egui_notify::ToastLevel::Error,
+                        tr!("nve-result-parse-error", "error" => error.to_string()),
+                    );
                     self.result = Some(ResultView {
                         ok: false,
                         summary: tr!("nve-result-parse-error", "error" => error.to_string()),

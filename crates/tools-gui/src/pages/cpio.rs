@@ -1,6 +1,6 @@
 use crate::app::HaucetApp;
 use crate::pages::badge_text;
-use crate::util::{human_size, message_box, mode_string};
+use crate::util::{human_size, mode_string};
 use common::compress::decompress_vec;
 use common::formats::cpio::{self, Cpio, S_IFDIR, S_IFMT};
 use common::formats::harmony::HvbFrame;
@@ -191,7 +191,6 @@ impl CpioPage {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_local_job();
         if self.load_requested {
             self.load_requested = false;
             self.request_load(app);
@@ -211,15 +210,6 @@ impl CpioPage {
                 if let Some(loaded) = &loaded {
                     self.summary_row(ui, loaded);
                 }
-                if let Some((ok, text)) = &self.message {
-                    ui.add_space(6.0);
-                    let color = if *ok {
-                        egui::Color32::from_rgb(90, 200, 120)
-                    } else {
-                        egui::Color32::from_rgb(230, 90, 90)
-                    };
-                    message_box(ui, color, text);
-                }
                 ui.add_space(6.0);
                 if let Some(loaded) = &mut loaded {
                     self.browser(ui, app, loaded);
@@ -227,6 +217,7 @@ impl CpioPage {
                 ui.add_space(20.0);
             });
 
+        self.notify_message(app);
         self.loaded = if self.active_load.is_some() || self.queued_load.is_some() {
             None
         } else {
@@ -364,7 +355,13 @@ impl CpioPage {
         }));
     }
 
-    fn poll_local_job(&mut self) {
+    pub(crate) fn notify_message(&mut self, app: &mut HaucetApp) {
+        if let Some((ok, text)) = self.message.take() {
+            app.notify_outcome(ok, text);
+        }
+    }
+
+    pub(crate) fn poll_local_job(&mut self, app: &mut HaucetApp) {
         let Some(job) = &mut self.load_job else {
             return;
         };
@@ -415,6 +412,7 @@ impl CpioPage {
                 self.message = Some((false, error));
             }
         }
+        self.notify_message(app);
         if let Some(request) = self.queued_load.take() {
             self.begin_load(request);
         }

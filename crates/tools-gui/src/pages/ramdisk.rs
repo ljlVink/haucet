@@ -1,9 +1,7 @@
 use crate::app::HaucetApp;
 use crate::pages::images::ImageKind;
 use crate::pages::{ResultView, badge_text, run_button};
-use crate::util::{
-    human_size, message_box, open_in_file_manager, sibling_output_path, update_derived_path,
-};
+use crate::util::{human_size, open_in_file_manager, sibling_output_path, update_derived_path};
 use eframe::egui;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,7 +52,7 @@ pub struct PatchState {
     pub binary: String,
     pub output: String,
     pub probe: Option<ProbeInfo>,
-    pub probe_error: Option<String>,
+
     auto_output: Option<String>,
 }
 
@@ -78,14 +76,12 @@ impl RamdiskPage {
     pub fn select_patch_image(&mut self, image: String) {
         self.patch.image = image;
         self.patch.probe = None;
-        self.patch.probe_error = None;
+
         self.update_patch_output();
         self.probe_requested = !self.patch.image.trim().is_empty();
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
-
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(tr!("operation")).weak());
@@ -105,7 +101,7 @@ impl RamdiskPage {
         self.show_result(ui);
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_image_result(ImageKind::Ramdisk) else {
             return;
         };
@@ -118,8 +114,8 @@ impl RamdiskPage {
                     return;
                 }
                 if !result.ok {
+                    app.notify_result(&result);
                     self.patch.probe = None;
-                    self.patch.probe_error = Some(result.summary);
                 } else {
                     match result
                         .payload
@@ -127,11 +123,13 @@ impl RamdiskPage {
                     {
                         Some(probe) => {
                             self.patch.probe = Some(probe);
-                            self.patch.probe_error = None;
                         }
                         None => {
                             self.patch.probe = None;
-                            self.patch.probe_error = Some(tr!("ramdisk-probe-invalid"));
+                            app.notify(
+                                egui_notify::ToastLevel::Error,
+                                tr!("ramdisk-probe-invalid"),
+                            );
                         }
                     }
                 }
@@ -141,6 +139,7 @@ impl RamdiskPage {
             | PendingOp::Repack { output }
             | PendingOp::Patch { output } => output,
         };
+        app.notify_result(&result);
         self.result = Some(ResultView {
             ok: result.ok,
             summary: result.summary,
@@ -267,7 +266,7 @@ impl RamdiskPage {
             );
             if response.changed() {
                 self.patch.probe = None;
-                self.patch.probe_error = None;
+
                 self.update_patch_output();
                 self.probe_requested = std::path::Path::new(self.patch.image.trim()).is_file();
             }
@@ -348,9 +347,6 @@ impl RamdiskPage {
                             }
                         });
                 });
-        } else if let Some(error) = &self.patch.probe_error {
-            ui.add_space(6.0);
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), error);
         }
 
         ui.add_space(8.0);
@@ -427,13 +423,11 @@ impl RamdiskPage {
             return;
         };
         ui.add_space(6.0);
-        if result.ok {
-            message_box(ui, egui::Color32::from_rgb(90, 200, 120), &result.summary);
-            if !result.output.is_empty() && ui.button(tr!("open-output-location")).clicked() {
-                open_in_file_manager(std::path::Path::new(&result.output));
-            }
-        } else {
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), &result.summary);
+        if result.ok
+            && !result.output.is_empty()
+            && ui.button(tr!("open-output-location")).clicked()
+        {
+            open_in_file_manager(std::path::Path::new(&result.output));
         }
     }
 

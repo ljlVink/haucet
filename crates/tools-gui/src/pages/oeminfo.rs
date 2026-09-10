@@ -1,6 +1,6 @@
 use crate::app::HaucetApp;
 use crate::pages::Page;
-use crate::util::{human_size, message_box, open_in_file_manager, section};
+use crate::util::{human_size, open_in_file_manager, section};
 use anyhow::{Context, Result, ensure};
 use common::oeminfo::{OemInfoBlockSummary, OemInfoImageSummary, OemInfoPayloadKind};
 use eframe::egui;
@@ -25,7 +25,7 @@ pub struct OemInfoPage {
     filter: String,
     active_only: bool,
     summary: Option<OemInfoImageSummary>,
-    error: Option<String>,
+
     selected_block: Option<usize>,
     inspect_requested: bool,
     inspect_generation: u64,
@@ -45,7 +45,7 @@ impl Default for OemInfoPage {
             filter: String::new(),
             active_only: true,
             summary: None,
-            error: None,
+
             selected_block: None,
             inspect_requested: false,
             inspect_generation: 0,
@@ -69,7 +69,6 @@ enum OemInfoOperation {
 #[derive(Debug)]
 struct ExportResult {
     ok: bool,
-    summary: String,
     output: String,
 }
 
@@ -125,14 +124,13 @@ struct PreviewTexture {
 #[derive(Debug)]
 struct PreviewError {
     key: PreviewKey,
-    message: String,
 }
 
 impl OemInfoPage {
     pub fn select_input(&mut self, input: String) {
         self.input = input;
         self.summary = None;
-        self.error = None;
+
         self.export_result = None;
         self.selected_block = None;
         self.clear_preview();
@@ -140,9 +138,6 @@ impl OemInfoPage {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
-        self.poll_preview(ui.ctx());
-
         egui::ScrollArea::vertical()
             .id_salt("oeminfo-scroll")
             .auto_shrink([false, false])
@@ -155,11 +150,6 @@ impl OemInfoPage {
                     self.select_input(path.display().to_string());
                 }
                 self.start_inspection(app);
-
-                if let Some(error) = &self.error {
-                    ui.add_space(10.0);
-                    message_box(ui, egui::Color32::from_rgb(230, 90, 90), error);
-                }
 
                 self.render_export_result(ui);
 
@@ -185,7 +175,7 @@ impl OemInfoPage {
                 response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if response.changed() {
                 self.summary = None;
-                self.error = None;
+
                 self.export_result = None;
                 self.selected_block = None;
                 self.clear_preview();
@@ -239,15 +229,6 @@ impl OemInfoPage {
                     );
                     ui.end_row();
                 });
-
-            if summary.discarded_headers != 0 {
-                ui.add_space(8.0);
-                message_box(
-                    ui,
-                    egui::Color32::from_rgb(225, 155, 60),
-                    tr!("discarded-header-warning", "count" => summary.discarded_headers),
-                );
-            }
 
             render_overview(ui, &common::oeminfo::overview(summary));
         }
@@ -316,7 +297,7 @@ impl OemInfoPage {
         });
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_result(Page::OemInfo) else {
             return;
         };
@@ -328,24 +309,25 @@ impl OemInfoPage {
                 if input != self.input.trim() || generation != self.inspect_generation {
                     return;
                 }
-                self.finish_inspection(result);
+                self.finish_inspection(result, app);
             }
             OemInfoOperation::Export { output } => {
+                app.notify_result(&result);
                 self.export_result = Some(ExportResult {
                     ok: result.ok,
-                    summary: result.summary,
                     output,
                 });
             }
         }
     }
 
-    fn finish_inspection(&mut self, result: crate::job::JobResult) {
+    fn finish_inspection(&mut self, result: crate::job::JobResult, app: &mut HaucetApp) {
         if !result.ok {
+            app.notify_result(&result);
             self.summary = None;
             self.selected_block = None;
             self.clear_preview();
-            self.error = Some(result.summary);
+
             return;
         }
 
@@ -353,11 +335,21 @@ impl OemInfoPage {
             self.summary = None;
             self.selected_block = None;
             self.clear_preview();
-            self.error = Some(tr!("oeminfo-summary-missing"));
+            app.notify(
+                egui_notify::ToastLevel::Error,
+                tr!("oeminfo-summary-missing"),
+            );
+
             return;
         };
         match serde_json::from_value::<OemInfoImageSummary>(payload) {
             Ok(summary) => {
+                if summary.discarded_headers != 0 {
+                    app.notify(
+                        egui_notify::ToastLevel::Warning,
+                        tr!("discarded-header-warning", "count" => summary.discarded_headers),
+                    );
+                }
                 self.selected_block = summary
                     .blocks
                     .iter()
@@ -365,13 +357,15 @@ impl OemInfoPage {
                     .or_else(|| (!summary.blocks.is_empty()).then_some(0));
                 self.clear_preview();
                 self.summary = Some(summary);
-                self.error = None;
             }
             Err(error) => {
                 self.summary = None;
                 self.selected_block = None;
                 self.clear_preview();
-                self.error = Some(tr!("oeminfo-result-parse-error", "error" => error.to_string()));
+                app.notify(
+                    egui_notify::ToastLevel::Error,
+                    tr!("oeminfo-result-parse-error", "error" => error.to_string()),
+                );
             }
         }
     }
@@ -402,12 +396,6 @@ impl OemInfoPage {
             return;
         };
         ui.add_space(10.0);
-        let color = if result.ok {
-            egui::Color32::from_rgb(90, 200, 120)
-        } else {
-            egui::Color32::from_rgb(230, 90, 90)
-        };
-        message_box(ui, color, &result.summary);
         if result.ok && ui.button(tr!("open-export-location")).clicked() {
             open_in_file_manager(Path::new(&result.output));
         }
@@ -421,7 +409,7 @@ impl OemInfoPage {
     ) {
         section(ui, &tr!("image-preview"));
         let key = self.preview_key(block);
-        self.ensure_preview(ui.ctx(), key.clone(), block.clone());
+        self.ensure_preview(ui.ctx(), key.clone(), block.clone(), app);
 
         ui.horizontal_wrapped(|ui| {
             ui.label(
@@ -477,17 +465,11 @@ impl OemInfoPage {
             let display_size = preview_display_size(preview.preview_size, ui.available_width());
             ui.add(egui::Image::new(&preview.texture).fit_to_exact_size(display_size))
                 .on_hover_text(tr!("preview-texture-size", "width" => preview.preview_size[0], "height" => preview.preview_size[1]));
-        } else if let Some(message) = self
+        } else if self
             .preview_error
             .as_ref()
-            .filter(|error| error.key == key)
-            .map(|error| error.message.clone())
+            .is_some_and(|error| error.key == key)
         {
-            message_box(
-                ui,
-                egui::Color32::from_rgb(230, 90, 90),
-                tr!("preview-failed", "error" => message),
-            );
             if ui.button(tr!("reload-preview")).clicked() {
                 self.preview_error = None;
             }
@@ -509,7 +491,13 @@ impl OemInfoPage {
         }
     }
 
-    fn ensure_preview(&mut self, ctx: &egui::Context, key: PreviewKey, block: OemInfoBlockSummary) {
+    fn ensure_preview(
+        &mut self,
+        ctx: &egui::Context,
+        key: PreviewKey,
+        block: OemInfoBlockSummary,
+        app: &mut HaucetApp,
+    ) {
         if self
             .preview_texture
             .as_ref()
@@ -551,14 +539,15 @@ impl OemInfoPage {
             self.preview_request = Some(PendingPreview { key, cancelled });
         } else {
             self.preview_worker = None;
-            self.preview_error = Some(PreviewError {
+            self.set_preview_error(
+                app,
                 key,
-                message: "image preview worker exited unexpectedly".to_owned(),
-            });
+                "image preview worker exited unexpectedly".to_owned(),
+            );
         }
     }
 
-    fn poll_preview(&mut self, ctx: &egui::Context) {
+    pub(crate) fn poll_preview(&mut self, ctx: &egui::Context, app: &mut HaucetApp) {
         loop {
             let event = match self.preview_worker.as_ref() {
                 Some(worker) => worker.result_receiver.try_recv(),
@@ -572,10 +561,11 @@ impl OemInfoPage {
                     if let Some(request) = self.preview_request.take()
                         && self.current_preview_key().as_ref() == Some(&request.key)
                     {
-                        self.preview_error = Some(PreviewError {
-                            key: request.key,
-                            message: "image preview worker exited unexpectedly".to_owned(),
-                        });
+                        self.set_preview_error(
+                            app,
+                            request.key,
+                            "image preview worker exited unexpectedly".to_owned(),
+                        );
                     }
                     return;
                 }
@@ -612,13 +602,18 @@ impl OemInfoPage {
                 }
                 Err(message_text) => {
                     self.preview_texture = None;
-                    self.preview_error = Some(PreviewError {
-                        key: message.key,
-                        message: message_text,
-                    });
+                    self.set_preview_error(app, message.key, message_text);
                 }
             }
         }
+    }
+
+    fn set_preview_error(&mut self, app: &mut HaucetApp, key: PreviewKey, message: String) {
+        app.notify(
+            egui_notify::ToastLevel::Error,
+            tr!("preview-failed", "error" => message),
+        );
+        self.preview_error = Some(PreviewError { key });
     }
 
     fn clear_preview(&mut self) {

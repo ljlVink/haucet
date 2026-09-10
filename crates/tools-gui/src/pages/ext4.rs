@@ -1,7 +1,7 @@
 use crate::app::HaucetApp;
 use crate::pages::images::ImageKind;
 use crate::pages::{ResultView, run_button};
-use crate::util::{message_box, open_in_file_manager, sibling_output_path, update_derived_path};
+use crate::util::{open_in_file_manager, sibling_output_path, update_derived_path};
 use eframe::egui;
 
 #[derive(Debug, Default)]
@@ -21,8 +21,6 @@ impl Ext4Page {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
-
         ui.add_space(6.0);
         ui.label(egui::RichText::new(tr!("ext4-unpack-help")).weak());
         ui.add_space(6.0);
@@ -83,13 +81,14 @@ impl Ext4Page {
         self.show_result(ui);
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_image_result(ImageKind::Ext4) else {
             return;
         };
         let Some(output) = self.pending_output.take() else {
             return;
         };
+        app.notify_result(&result);
         self.result = Some(ResultView {
             ok: result.ok,
             summary: result.summary,
@@ -102,13 +101,11 @@ impl Ext4Page {
             return;
         };
         ui.add_space(10.0);
-        if result.ok {
-            message_box(ui, egui::Color32::from_rgb(90, 200, 120), &result.summary);
-            if !result.output.is_empty() && ui.button(tr!("open-output-location")).clicked() {
-                open_in_file_manager(std::path::Path::new(&result.output));
-            }
-        } else {
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), &result.summary);
+        if result.ok
+            && !result.output.is_empty()
+            && ui.button(tr!("open-output-location")).clicked()
+        {
+            open_in_file_manager(std::path::Path::new(&result.output));
         }
     }
 

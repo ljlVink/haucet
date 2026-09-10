@@ -1,9 +1,7 @@
 use crate::app::HaucetApp;
 use crate::pages::images::ImageKind;
 use crate::pages::{ResultView, run_button};
-use crate::util::{
-    human_size, message_box, open_in_file_manager, sibling_output_path, update_derived_path,
-};
+use crate::util::{human_size, open_in_file_manager, sibling_output_path, update_derived_path};
 use common::formats::erofs::ErofsManifest;
 use eframe::egui;
 use std::path::Path;
@@ -45,7 +43,7 @@ pub struct RepackState {
     pub output: String,
     pub allow_grow: bool,
     pub manifest: Option<ErofsManifest>,
-    pub manifest_error: Option<String>,
+
     pub manifest_from: String,
     manifest_stamp: Option<ManifestStamp>,
     auto_output: Option<String>,
@@ -69,15 +67,12 @@ impl ErofsPage {
     pub fn select_workspace(&mut self, workspace: String) {
         self.repack.workspace = workspace;
         self.repack.manifest = None;
-        self.repack.manifest_error = None;
+
         self.repack.manifest_from.clear();
         self.repack.manifest_stamp = None;
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
-        self.poll_manifest();
-
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(tr!("operation")).weak());
@@ -95,13 +90,14 @@ impl ErofsPage {
         self.show_result(ui);
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_image_result(ImageKind::Erofs) else {
             return;
         };
         let Some(pending) = self.pending.take() else {
             return;
         };
+        app.notify_result(&result);
         self.apply_result(pending, result);
     }
 
@@ -123,11 +119,11 @@ impl ErofsPage {
         });
     }
 
-    fn poll_manifest(&mut self) {
+    fn poll_manifest(&mut self, app: &mut HaucetApp) {
         let workspace = self.repack.workspace.trim().to_owned();
         if workspace.is_empty() {
             self.repack.manifest = None;
-            self.repack.manifest_error = None;
+
             self.repack.manifest_from.clear();
             self.repack.manifest_stamp = None;
             return;
@@ -144,12 +140,16 @@ impl ErofsPage {
             Ok(manifest) => {
                 let next = default_repack_output(&workspace, &manifest.original_file_name);
                 update_derived_path(&mut self.repack.output, &mut self.repack.auto_output, next);
-                self.repack.manifest_error = None;
+
                 self.repack.manifest = Some(manifest);
+                app.notify(
+                    egui_notify::ToastLevel::Warning,
+                    tr!("erofs-signature-warning"),
+                );
             }
             Err(error) => {
                 self.repack.manifest = None;
-                self.repack.manifest_error = Some(format!("{error:#}"));
+                app.notify(egui_notify::ToastLevel::Error, format!("{error:#}"));
             }
         }
     }
@@ -216,24 +216,35 @@ impl ErofsPage {
     fn repack_tab(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
         ui.label(egui::RichText::new(tr!("erofs-repack-help")).weak());
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(tr!("workspace-directory")).strong());
-            ui.add(
-                egui::TextEdit::singleline(&mut self.repack.workspace)
-                    .hint_text(tr!("erofs-workspace-hint"))
-                    .desired_width(ui.available_width() - 240.0),
-            );
-            if ui.button(tr!("choose-directory")).clicked()
-                && let Some(dir) = app.pick_dir(&tr!("choose-erofs-workspace"))
-            {
-                self.select_workspace(dir.display().to_string());
-            }
-        });
+        let editing_workspace = ui
+            .horizontal(|ui| {
+                ui.label(egui::RichText::new(tr!("workspace-directory")).strong());
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.repack.workspace)
+                        .hint_text(tr!("erofs-workspace-hint"))
+                        .desired_width(ui.available_width() - 240.0),
+                );
+                if response.changed() {
+                    self.repack.manifest = None;
+                    self.repack.manifest_stamp = None;
+                }
+                if ui.button(tr!("choose-directory")).clicked()
+                    && let Some(dir) = app.pick_dir(&tr!("choose-erofs-workspace"))
+                {
+                    self.select_workspace(dir.display().to_string());
+                }
+                response.has_focus()
+            })
+            .inner;
         let drops = app.take_drops(ui.ctx());
         if let Some(path) = drops.first()
             && path.is_dir()
         {
             self.select_workspace(path.display().to_string());
+        }
+        // Validate committed paths so typing does not produce an error toast per character.
+        if !editing_workspace {
+            self.poll_manifest(app);
         }
         ui.add_space(6.0);
         if let Some(manifest) = &self.repack.manifest {
@@ -267,14 +278,6 @@ impl ErofsPage {
                             );
                         });
                 });
-            ui.add_space(6.0);
-            message_box(
-                ui,
-                egui::Color32::from_rgb(230, 170, 40),
-                tr!("erofs-signature-warning"),
-            );
-        } else if let Some(error) = &self.repack.manifest_error {
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), error);
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -325,13 +328,11 @@ impl ErofsPage {
             return;
         };
         ui.add_space(6.0);
-        if result.ok {
-            message_box(ui, egui::Color32::from_rgb(90, 200, 120), &result.summary);
-            if !result.output.is_empty() && ui.button(tr!("open-output-location")).clicked() {
-                open_in_file_manager(std::path::Path::new(&result.output));
-            }
-        } else {
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), &result.summary);
+        if result.ok
+            && !result.output.is_empty()
+            && ui.button(tr!("open-output-location")).clicked()
+        {
+            open_in_file_manager(std::path::Path::new(&result.output));
         }
     }
 

@@ -94,15 +94,66 @@ pub fn kv(ui: &mut egui::Ui, key: &str, value: impl Into<egui::WidgetText>) {
     ui.end_row();
 }
 
-pub fn message_box(ui: &mut egui::Ui, color: egui::Color32, text: impl Into<egui::WidgetText>) {
-    let text = text.into();
-    egui::Frame::group(ui.style())
-        .fill(color.gamma_multiply(0.08))
-        .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.6)))
-        .inner_margin(egui::Margin::same(10))
-        .show(ui, |ui| {
-            ui.label(text);
+pub struct Notifications {
+    toasts: egui_notify::Toasts,
+    pending: Vec<(egui_notify::ToastLevel, String)>,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            toasts: egui_notify::Toasts::default()
+                .with_anchor(egui_notify::Anchor::TopRight)
+                .with_margin(egui::vec2(12.0, 12.0)),
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl Notifications {
+    // Enqueue only from events; identical results from separate operations are intentional.
+    pub fn push(&mut self, level: egui_notify::ToastLevel, text: String) {
+        self.pending.push((level, text));
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context) {
+        for (level, text) in self.pending.drain(..) {
+            let seconds = match level {
+                egui_notify::ToastLevel::Error | egui_notify::ToastLevel::Warning => 8,
+                _ => 5,
+            };
+            self.toasts
+                .add(egui_notify::Toast::custom(
+                    notification_caption(ctx, text),
+                    level,
+                ))
+                .closable(true)
+                .duration(std::time::Duration::from_secs(seconds));
+        }
+        // A solid, zero-blur shadow supplies the outline through egui-notify's
+        // public styling API. Resolve its color each frame to follow theme changes.
+        self.toasts = std::mem::take(&mut self.toasts).with_shadow(egui::Shadow {
+            offset: [0, 0],
+            blur: 0,
+            spread: 1,
+            color: ctx.global_style().visuals.window_stroke.color,
         });
+        self.toasts.show(ctx);
+    }
+}
+
+fn notification_caption(ctx: &egui::Context, text: String) -> std::sync::Arc<egui::Galley> {
+    // egui-notify otherwise measures captions without wrapping. Keep long paths and
+    // command output on screen; HaucetApp retains the complete message in its log.
+    let width = (ctx.content_rect().width() - 100.0).clamp(80.0, 420.0);
+    let mut job = egui::text::LayoutJob::simple(
+        text,
+        egui::FontId::proportional(16.0),
+        egui::Color32::PLACEHOLDER,
+        width,
+    );
+    job.wrap.max_rows = 8;
+    ctx.fonts_mut(|fonts| fonts.layout_job(job))
 }
 
 pub fn section(ui: &mut egui::Ui, title: &str) {

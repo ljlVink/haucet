@@ -1,6 +1,6 @@
 use crate::app::HaucetApp;
 use crate::pages::images::ImageKind;
-use crate::util::{human_size, kv, message_box, section};
+use crate::util::{human_size, kv, section};
 use common::entropy::EntropySummary;
 use common::formats::gpt::GptInfo;
 use common::formats::secimg::SecImageInfo;
@@ -34,8 +34,6 @@ impl PartitionPage {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
-
         ui.set_width(ui.available_width());
         ui.add_space(6.0);
         ui.label(egui::RichText::new(tr!("partition-help")).weak());
@@ -65,9 +63,6 @@ impl PartitionPage {
         self.start_inspection(app);
         ui.add_space(8.0);
 
-        if let Some(error) = &self.partition_error {
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), error);
-        }
         self.render_results(ui);
     }
 
@@ -106,7 +101,7 @@ impl PartitionPage {
         }
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_image_result(ImageKind::Partition) else {
             return;
         };
@@ -114,7 +109,39 @@ impl PartitionPage {
         if active_input.as_deref() != Some(self.input.trim()) {
             return;
         }
+        let cancelled = result.cancelled;
         self.apply_partition_result(result);
+        if let Some(error) = &self.partition_error {
+            app.notify(
+                if cancelled {
+                    egui_notify::ToastLevel::Warning
+                } else {
+                    egui_notify::ToastLevel::Error
+                },
+                error.clone(),
+            );
+        }
+        match &self.summary {
+            Some(PartitionSummary::HvbWrapped {
+                cert: None,
+                cert_error,
+                ..
+            }) => {
+                app.notify(egui_notify::ToastLevel::Warning, tr!("certificate-parse-error", "error" => cert_error.clone().unwrap_or_else(|| tr!("unknown-error"))));
+            }
+            Some(PartitionSummary::SecImage(secimg)) => {
+                for warning in &secimg.warnings {
+                    app.notify(egui_notify::ToastLevel::Warning, warning.clone());
+                }
+            }
+            Some(PartitionSummary::Gpt(gpt)) if gpt.tables.is_empty() => {
+                app.notify(
+                    egui_notify::ToastLevel::Warning,
+                    tr!("gpt-no-readable-table"),
+                );
+            }
+            _ => {}
+        }
     }
 
     fn start_inspection(&mut self, app: &mut HaucetApp) {
@@ -188,11 +215,7 @@ impl PartitionPage {
                 );
                 self.render_secimg(ui, secimg);
             }
-            PartitionSummary::HvbWrapped {
-                footer,
-                cert,
-                cert_error,
-            } => {
+            PartitionSummary::HvbWrapped { footer, cert, .. } => {
                 badge_heading(
                     ui,
                     &tr!("hvb-wrapped-partition-image"),
@@ -222,15 +245,8 @@ impl PartitionPage {
                     });
                 ui.add_space(6.0);
                 section(ui, &tr!("hvb-certificate"));
-                match cert {
-                    Some(cert) => render_cert(ui, cert),
-                    None => {
-                        message_box(
-                            ui,
-                            egui::Color32::from_rgb(230, 170, 40),
-                            tr!("certificate-parse-error", "error" => cert_error.clone().unwrap_or_else(|| tr!("unknown-error"))),
-                        );
-                    }
+                if let Some(cert) = cert {
+                    render_cert(ui, cert);
                 }
             }
         }
@@ -361,11 +377,6 @@ impl PartitionPage {
                 .small(),
             );
         }
-
-        for warning in &secimg.warnings {
-            ui.add_space(4.0);
-            message_box(ui, egui::Color32::from_rgb(230, 170, 40), warning);
-        }
     }
 
     fn render_rvt(&self, ui: &mut egui::Ui, rvt: &common::formats::rvt::RvtInfo) {
@@ -486,11 +497,6 @@ impl PartitionPage {
 
     fn render_gpt(&self, ui: &mut egui::Ui, gpt: &GptInfo) {
         let Some(first_table) = gpt.tables.first() else {
-            message_box(
-                ui,
-                egui::Color32::from_rgb(230, 170, 40),
-                tr!("gpt-no-readable-table"),
-            );
             return;
         };
         let header = &first_table.header;

@@ -1,6 +1,6 @@
 use crate::app::HaucetApp;
 use crate::pages::{Page, ResultView, run_button};
-use crate::util::{human_size, kv, message_box, section};
+use crate::util::{human_size, kv, section};
 use crate::worker::fastboot::{FastbootCommand, MemoryMap};
 use eframe::egui;
 use serde::Deserialize;
@@ -84,7 +84,6 @@ pub struct FastbootPage {
 
 impl FastbootPage {
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
         if !self.auto_checked && !app.job_running() {
             self.auto_checked = true;
             self.start_status(app);
@@ -159,18 +158,7 @@ impl FastbootPage {
         });
         ui.add_space(6.0);
 
-        if let Some(result) = &self.reboot_result {
-            let color = if result.ok {
-                egui::Color32::from_rgb(90, 200, 120)
-            } else {
-                egui::Color32::from_rgb(230, 90, 90)
-            };
-            message_box(ui, color, &result.summary);
-            ui.add_space(6.0);
-        }
-
-        if let Some(error) = &self.status_error {
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), error);
+        if self.status_error.is_some() {
             return;
         }
         let Some(status) = &self.status else {
@@ -178,14 +166,6 @@ impl FastbootPage {
             return;
         };
         if !status.connected {
-            let message = match status.devices.len() {
-                0 => tr!("fastboot-not-found"),
-                1 => tr!("fastboot-cannot-open"),
-                _ => {
-                    tr!("fastboot-multiple")
-                }
-            };
-            message_box(ui, egui::Color32::from_rgb(230, 170, 40), message);
             return;
         }
 
@@ -284,20 +264,6 @@ impl FastbootPage {
                 }
             });
         });
-        if let Some(result) = &self.command_result {
-            ui.add_space(6.0);
-            egui::ScrollArea::vertical()
-                .id_salt("fastboot-command-result")
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    let color = if result.ok {
-                        egui::Color32::from_rgb(90, 200, 120)
-                    } else {
-                        egui::Color32::from_rgb(230, 90, 90)
-                    };
-                    message_box(ui, color, &result.summary);
-                });
-        }
     }
 
     fn storage_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
@@ -394,14 +360,6 @@ impl FastbootPage {
         }
 
         ui.add_space(6.0);
-        if let Some(result) = &self.storage_result {
-            let color = if result.ok {
-                egui::Color32::from_rgb(90, 200, 120)
-            } else {
-                egui::Color32::from_rgb(230, 90, 90)
-            };
-            message_box(ui, color, &result.summary);
-        }
     }
 
     fn storage_controls(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
@@ -465,14 +423,6 @@ impl FastbootPage {
         });
 
         ui.add_space(10.0);
-        if let Some(result) = &self.extract_result {
-            let color = if result.ok {
-                egui::Color32::from_rgb(90, 200, 120)
-            } else {
-                egui::Color32::from_rgb(230, 90, 90)
-            };
-            message_box(ui, color, &result.summary);
-        }
     }
 
     fn memory_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
@@ -555,14 +505,6 @@ impl FastbootPage {
         } else if self.memory_result.is_none() {
             ui.label(egui::RichText::new(tr!("fastboot-memory-not-loaded")).weak());
         }
-        if let Some(result) = &self.memory_result {
-            let color = if result.ok {
-                egui::Color32::from_rgb(90, 200, 120)
-            } else {
-                egui::Color32::from_rgb(230, 90, 90)
-            };
-            message_box(ui, color, &result.summary);
-        }
     }
 
     fn flash_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
@@ -633,19 +575,13 @@ impl FastbootPage {
         }
 
         ui.add_space(10.0);
-        if let Some(result) = &self.result {
-            if result.ok {
-                message_box(ui, egui::Color32::from_rgb(90, 200, 120), &result.summary);
-            } else {
-                message_box(ui, egui::Color32::from_rgb(230, 90, 90), &result.summary);
-            }
-        }
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_result(Page::Fastboot) else {
             return;
         };
+        let cancelled = result.cancelled;
         let op = self.pending.take().unwrap_or(PendingOp::Status);
         match op {
             PendingOp::Status => {
@@ -723,6 +659,43 @@ impl FastbootPage {
             }
             PendingOp::StorageAnalyse => {
                 self.accept_storage_result(result);
+            }
+        }
+        let view = match op {
+            PendingOp::Status => {
+                if let Some(error) = &self.status_error {
+                    app.notify(
+                        if cancelled {
+                            egui_notify::ToastLevel::Warning
+                        } else {
+                            egui_notify::ToastLevel::Error
+                        },
+                        error.clone(),
+                    );
+                } else if let Some(status) = &self.status
+                    && !status.connected
+                {
+                    let message = match status.devices.len() {
+                        0 => tr!("fastboot-not-found"),
+                        1 => tr!("fastboot-cannot-open"),
+                        _ => tr!("fastboot-multiple"),
+                    };
+                    app.notify(egui_notify::ToastLevel::Warning, message);
+                }
+                None
+            }
+            PendingOp::Reboot => self.reboot_result.as_ref(),
+            PendingOp::Command(_) => self.command_result.as_ref(),
+            PendingOp::Extract => self.extract_result.as_ref(),
+            PendingOp::Flash => self.result.as_ref(),
+            PendingOp::MemoryList | PendingOp::UploadMemory => self.memory_result.as_ref(),
+            PendingOp::StorageAnalyse => self.storage_result.as_ref(),
+        };
+        if let Some(view) = view {
+            if cancelled {
+                app.notify(egui_notify::ToastLevel::Warning, view.summary.clone());
+            } else {
+                app.notify_outcome(view.ok, view.summary.clone());
             }
         }
     }

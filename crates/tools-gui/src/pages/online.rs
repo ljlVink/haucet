@@ -1,6 +1,6 @@
 use crate::app::HaucetApp;
 use crate::pages::{Page, run_button};
-use crate::util::{human_size, kv, message_box};
+use crate::util::{human_size, kv};
 use crate::worker::JobOp;
 use eframe::egui;
 use online_fetcher::VersionInfo;
@@ -11,13 +11,12 @@ pub struct OnlinePage {
     pending_url: Option<String>,
     info: Option<VersionInfo>,
     text: String,
-    error: Option<String>,
+
     saved: Option<String>,
 }
 
 impl OnlinePage {
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
         egui::ScrollArea::vertical()
             .id_salt("online-info-scroll")
             .auto_shrink([false, false])
@@ -32,7 +31,7 @@ impl OnlinePage {
                 if input.changed() {
                     self.info = None;
                     self.text.clear();
-                    self.error = None;
+
                     self.saved = None;
                 }
                 let submitted =
@@ -46,14 +45,11 @@ impl OnlinePage {
                     self.pending_url = Some(url.clone());
                     self.info = None;
                     self.text.clear();
-                    self.error = None;
+
                     self.saved = None;
                     app.start_job(JobOp::OnlineFetch { url });
                 }
                 ui.add_space(12.0);
-                if let Some(error) = &self.error {
-                    message_box(ui, egui::Color32::from_rgb(230, 90, 90), error);
-                }
                 if let Some(info) = &self.info {
                     egui::Grid::new("online-info-grid")
                         .num_columns(2)
@@ -89,7 +85,7 @@ impl OnlinePage {
             });
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_result(Page::Online) else {
             return;
         };
@@ -97,11 +93,7 @@ impl OnlinePage {
             return;
         }
         if !result.ok {
-            self.error = Some(if result.cancelled {
-                tr!("online-cancelled")
-            } else {
-                result.summary
-            });
+            app.notify_result(&result);
             return;
         }
         let info = result
@@ -112,7 +104,9 @@ impl OnlinePage {
                 self.text = info.text();
                 self.info = Some(info);
             }
-            None => self.error = Some(tr!("worker-result-invalid")),
+            None => {
+                app.notify(egui_notify::ToastLevel::Error, tr!("worker-result-invalid"));
+            }
         }
     }
 }

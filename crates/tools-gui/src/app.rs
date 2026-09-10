@@ -27,13 +27,14 @@ pub(crate) struct HaucetApp {
     job_owner: ResultOwner,
     pub logs: Vec<String>,
     pub settings: Settings,
-    pub font_loaded: bool,
+    font_warning_pending: bool,
     pub logo: Option<egui::TextureHandle>,
     vibrancy_enabled: bool,
     transparent_window_at_startup: bool,
     native_theme: Option<egui::Theme>,
     dialog: Option<AppDialog>,
     results: ResultStore,
+    notifications: crate::util::Notifications,
 }
 
 #[derive(Clone, Copy)]
@@ -114,13 +115,14 @@ impl HaucetApp {
             job_owner: ResultOwner::Page(Page::Home),
             logs: Vec::new(),
             settings,
-            font_loaded,
+            font_warning_pending: !font_loaded,
             logo,
             vibrancy_enabled,
             transparent_window_at_startup,
             native_theme: None,
             dialog,
             results: ResultStore::default(),
+            notifications: crate::util::Notifications::default(),
         }
     }
 }
@@ -128,6 +130,7 @@ impl HaucetApp {
 impl eframe::App for HaucetApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job();
+        self.poll_page_results(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
         let theme = ctx.theme();
         if self.native_theme != Some(theme) {
@@ -153,6 +156,7 @@ impl eframe::App for HaucetApp {
         if !self.settings.startup_notice_accepted {
             egui::CentralPanel::default().show_inside(ui, |_| {});
             self.show_startup_notice(&ctx);
+            self.notifications.show(&ctx);
             return;
         }
 
@@ -164,23 +168,12 @@ impl eframe::App for HaucetApp {
         self.page_header_panel(ui);
         egui::CentralPanel::default().show_inside(ui, |ui| self.central(ui));
 
-        if !self.font_loaded {
-            egui::Area::new("font-warning".into())
-                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 46.0))
-                .show(&ctx, |ui| {
-                    egui::Frame::group(ui.style())
-                        .fill(egui::Color32::from_rgb(90, 60, 10).gamma_multiply(0.9))
-                        .inner_margin(egui::Margin::same(10))
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(tr!("font-warning"))
-                                    .color(egui::Color32::from_rgb(255, 220, 160)),
-                            );
-                        });
-                });
+        if std::mem::take(&mut self.font_warning_pending) {
+            self.notify(egui_notify::ToastLevel::Warning, tr!("font-warning"));
         }
 
         self.show_dialog(&ctx);
+        self.notifications.show(&ctx);
 
         if self.job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -201,6 +194,65 @@ impl eframe::App for HaucetApp {
 }
 
 impl HaucetApp {
+    fn poll_page_results(&mut self, ctx: &egui::Context) {
+        // Deliver completed results to their owning page even after navigation.
+        macro_rules! poll_page {
+            ($($field:ident).+) => {{
+                let mut page = std::mem::take(&mut self.$($field).+);
+                page.poll_result(self);
+                self.$($field).+ = page;
+            }};
+        }
+        poll_page!(package);
+        poll_page!(online);
+        poll_page!(images.erofs);
+        poll_page!(images.ext4);
+        poll_page!(images.ramdisk);
+        poll_page!(images.partition);
+        poll_page!(fastboot);
+        poll_page!(vcom);
+        poll_page!(nvme);
+        let mut oeminfo = std::mem::take(&mut self.oeminfo);
+        oeminfo.poll_result(self);
+        oeminfo.poll_preview(ctx, self);
+        self.oeminfo = oeminfo;
+        let mut cpio = std::mem::take(&mut self.cpio);
+        cpio.poll_local_job(self);
+        if cpio.load_job.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        self.cpio = cpio;
+    }
+
+    pub fn notify(&mut self, level: egui_notify::ToastLevel, text: impl Into<String>) {
+        let text = text.into();
+        self.push_log(text.clone());
+        self.notifications.push(level, text);
+    }
+
+    pub fn notify_outcome(&mut self, ok: bool, text: impl Into<String>) {
+        self.notify(
+            if ok {
+                egui_notify::ToastLevel::Success
+            } else {
+                egui_notify::ToastLevel::Error
+            },
+            text,
+        );
+    }
+
+    pub fn notify_result(&mut self, result: &JobResult) {
+        let level = if result.cancelled {
+            egui_notify::ToastLevel::Warning
+        } else if result.ok {
+            egui_notify::ToastLevel::Success
+        } else {
+            egui_notify::ToastLevel::Error
+        };
+        // Worker summaries already have a status-prefixed entry in the log.
+        self.notifications.push(level, result.summary.clone());
+    }
+
     fn poll_job(&mut self) {
         let mut events = Vec::new();
         if let Some(job) = &mut self.job {

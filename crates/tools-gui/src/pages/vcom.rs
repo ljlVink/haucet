@@ -1,6 +1,6 @@
 use crate::app::HaucetApp;
 use crate::pages::{Page, ResultView, badge_text, run_button};
-use crate::util::{kv, message_box, section};
+use crate::util::{kv, section};
 use eframe::egui;
 use hisi_vcom::vcom::parse_address;
 use serde::Deserialize;
@@ -38,7 +38,6 @@ pub struct VcomPage {
 
 impl VcomPage {
     pub fn ui(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
-        self.poll_result(app);
         if !self.auto_checked && !app.job_running() {
             self.auto_checked = true;
             self.start_status(app);
@@ -76,8 +75,7 @@ impl VcomPage {
         });
         ui.add_space(6.0);
 
-        if let Some(error) = &self.status_error {
-            message_box(ui, egui::Color32::from_rgb(230, 90, 90), error);
+        if self.status_error.is_some() {
             return;
         }
         let Some(status) = &self.status else {
@@ -86,11 +84,6 @@ impl VcomPage {
         };
 
         if status.ports.is_empty() {
-            message_box(
-                ui,
-                egui::Color32::from_rgb(230, 170, 40),
-                tr!("vcom-not-found"),
-            );
             return;
         }
 
@@ -203,29 +196,24 @@ impl VcomPage {
         if app.job_running() {
             ui.label(egui::RichText::new(tr!("flash-task-running")).weak());
         }
-
-        if let Some(result) = &self.result {
-            let color = if result.ok {
-                egui::Color32::from_rgb(90, 200, 120)
-            } else {
-                egui::Color32::from_rgb(230, 90, 90)
-            };
-            message_box(ui, color, &result.summary);
-        }
     }
 
-    fn poll_result(&mut self, app: &mut HaucetApp) {
+    pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {
         let Some(result) = app.take_result(Page::Vcom) else {
             return;
         };
         match self.pending.take().unwrap_or(PendingOp::Status) {
             PendingOp::Status => {
                 if !result.ok {
+                    app.notify_result(&result);
                     self.status = None;
                     self.status_error = Some(result.summary);
                 } else if let Some(payload) = result.payload {
                     match serde_json::from_value::<VcomStatusPayload>(payload) {
                         Ok(status) => {
+                            if status.ports.is_empty() {
+                                app.notify(egui_notify::ToastLevel::Warning, tr!("vcom-not-found"));
+                            }
                             if self.port.trim().is_empty()
                                 && let Some(port) = status.ports.first()
                             {
@@ -235,6 +223,10 @@ impl VcomPage {
                             self.status_error = None;
                         }
                         Err(error) => {
+                            app.notify(
+                                egui_notify::ToastLevel::Error,
+                                tr!("vcom-status-parse-error", "error" => error.to_string()),
+                            );
                             self.status = None;
                             self.status_error =
                                 Some(tr!("vcom-status-parse-error", "error" => error.to_string()));
@@ -243,6 +235,7 @@ impl VcomPage {
                 }
             }
             PendingOp::Flash => {
+                app.notify_result(&result);
                 self.result = Some(ResultView {
                     ok: result.ok,
                     summary: result.summary,
