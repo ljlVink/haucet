@@ -94,6 +94,8 @@ pub fn kv(ui: &mut egui::Ui, key: &str, value: impl Into<egui::WidgetText>) {
     ui.end_row();
 }
 
+const NOTIFICATION_FONT_SIZE: f32 = 16.0;
+
 pub struct Notifications {
     toasts: egui_notify::Toasts,
     pending: Vec<(egui_notify::ToastLevel, String)>,
@@ -142,18 +144,28 @@ impl Notifications {
     }
 }
 
-fn notification_caption(ctx: &egui::Context, text: String) -> std::sync::Arc<egui::Galley> {
+fn notification_caption(ctx: &egui::Context, text: String) -> egui::RichText {
     // egui-notify otherwise measures captions without wrapping. Keep long paths and
     // command output on screen; HaucetApp retains the complete message in its log.
     let width = (ctx.content_rect().width() - 100.0).clamp(80.0, 420.0);
     let mut job = egui::text::LayoutJob::simple(
         text,
-        egui::FontId::proportional(16.0),
+        egui::FontId::proportional(NOTIFICATION_FONT_SIZE),
         egui::Color32::PLACEHOLDER,
         width,
     );
     job.wrap.max_rows = 8;
-    ctx.fonts_mut(|fonts| fonts.layout_job(job))
+    let galley = ctx.fonts_mut(|fonts| fonts.layout_job(job));
+    // Keep only the wrapped characters, including the overflow ellipsis. Theme
+    // changes rebuild egui's font atlas, invalidating a Galley's cached glyph UVs.
+    // RichText lets egui-notify lay out against the current atlas on every frame.
+    let wrapped_text = galley
+        .rows
+        .iter()
+        .map(|row| row.glyphs.iter().map(|glyph| glyph.chr).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    egui::RichText::new(wrapped_text).size(NOTIFICATION_FONT_SIZE)
 }
 
 pub fn section(ui: &mut egui::Ui, title: &str) {
