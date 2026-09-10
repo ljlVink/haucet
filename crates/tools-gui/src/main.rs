@@ -12,6 +12,8 @@ mod pages;
 mod settings;
 mod util;
 mod vibrancy;
+#[cfg(windows)]
+mod window_frame;
 mod worker;
 
 use app::HaucetApp;

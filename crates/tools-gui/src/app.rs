@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 const LICENSE_SPDX: &str = env!("CARGO_PKG_LICENSE");
 const REPOSITORY_URL: &str = "https://github.com/ljlVink/haucet";
+const APP_DIALOG_SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
 
 pub(crate) struct HaucetApp {
     pub current: Page,
@@ -95,6 +96,8 @@ impl HaucetApp {
         });
         let transparent_window_at_startup = settings.transparent_window;
         let vibrancy_enabled = transparent_window_at_startup && crate::vibrancy::apply(cc);
+        let dialog = (settings.last_seen_version.as_deref() != Some(common::version::VERSION))
+            .then_some(AppDialog::About);
         Self {
             current: Page::Home,
             home: pages::home::HomePage::default(),
@@ -115,7 +118,7 @@ impl HaucetApp {
             vibrancy_enabled,
             transparent_window_at_startup,
             native_theme: None,
-            dialog: None,
+            dialog,
             results: ResultStore::default(),
         }
     }
@@ -131,6 +134,10 @@ impl eframe::App for HaucetApp {
                 egui::Theme::Dark => egui::SystemTheme::Dark,
                 egui::Theme::Light => egui::SystemTheme::Light,
             }));
+            #[cfg(windows)]
+            if !self.vibrancy_enabled {
+                crate::window_frame::apply(_frame, &ctx.global_style().visuals);
+            }
             self.native_theme = Some(theme);
         }
     }
@@ -140,6 +147,12 @@ impl eframe::App for HaucetApp {
         if self.vibrancy_enabled {
             // Avoid tinting only the client area on top of the native backdrop.
             ui.visuals_mut().panel_fill = egui::Color32::TRANSPARENT;
+        }
+
+        if !self.settings.startup_notice_accepted {
+            egui::CentralPanel::default().show_inside(ui, |_| {});
+            self.show_startup_notice(&ctx);
+            return;
         }
 
         egui::Panel::left("nav")
@@ -392,6 +405,101 @@ impl HaucetApp {
         }
     }
 
+    fn language_selector(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(tr!("language-label"));
+            let previous = self.settings.language;
+            egui::ComboBox::from_id_salt("language-select")
+                .selected_text(self.settings.language.native_name())
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    for language in Language::ALL {
+                        ui.selectable_value(
+                            &mut self.settings.language,
+                            language,
+                            language.native_name(),
+                        );
+                    }
+                });
+            if self.settings.language != previous {
+                i18n::set_language(self.settings.language);
+                self.settings.save();
+                ui.ctx().request_repaint();
+            }
+        });
+    }
+
+    fn show_startup_notice(&mut self, ctx: &egui::Context) {
+        // Acceptance is explicit: Escape and backdrop clicks must not dismiss this notice.
+        egui::Modal::new(egui::Id::new("startup-notice"))
+            .frame(egui::Frame::popup(&ctx.global_style()).inner_margin(20))
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                self.language_selector(ui);
+                ui.add_space(12.0);
+                ui.vertical_centered(|ui| {
+                    ui.heading(tr!("startup-notice-title"));
+                });
+                ui.add_space(8.0);
+                ui.label(tr!("startup-notice-intro"));
+                ui.add_space(12.0);
+
+                egui::ScrollArea::vertical()
+                    .id_salt("startup-notice-body")
+                    .max_height((ctx.content_rect().height() - 240.0).clamp(120.0, 380.0))
+                    .show(ui, |ui| {
+                        egui::Frame::group(ui.style())
+                            .fill(ui.visuals().warn_fg_color.gamma_multiply(0.12))
+                            .inner_margin(12)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(tr!("startup-notice-free"))
+                                        .strong()
+                                        .color(ui.visuals().warn_fg_color),
+                                );
+                            });
+                        ui.add_space(12.0);
+                        ui.label(tr!("startup-notice-purpose"));
+                        ui.add_space(8.0);
+                        ui.label(tr!("startup-notice-authorization"));
+                        ui.add_space(8.0);
+                        ui.label(tr!("startup-notice-risk"));
+                        ui.add_space(8.0);
+                        ui.label(tr!("startup-notice-warranty"));
+                        ui.add_space(8.0);
+                        ui.label(tr!("startup-notice-license", "license" => LICENSE_SPDX));
+                        ui.hyperlink_to(tr!("repository-label"), REPOSITORY_URL);
+                    });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let button_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                    if ui
+                        .add_sized(
+                            [button_width, 36.0],
+                            egui::Button::new(tr!("startup-notice-accept")),
+                        )
+                        .clicked()
+                    {
+                        self.settings.startup_notice_accepted = true;
+                        self.settings.save();
+                        ctx.request_repaint();
+                    }
+                    if ui
+                        .add_sized(
+                            [button_width, 36.0],
+                            egui::Button::new(tr!("startup-notice-decline")),
+                        )
+                        .clicked()
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
+    }
+
     fn show_dialog(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.dialog else {
             return;
@@ -403,6 +511,8 @@ impl HaucetApp {
         let response = egui::Modal::new(egui::Id::new(id))
             .frame(egui::Frame::popup(&ctx.global_style()).inner_margin(20))
             .show(ctx, |ui| {
+                ui.set_width(APP_DIALOG_SIZE.x);
+                ui.set_height(APP_DIALOG_SIZE.y);
                 ui.horizontal(|ui| {
                     if let Some(logo) = &self.logo {
                         ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(48.0, 48.0)));
@@ -413,84 +523,86 @@ impl HaucetApp {
                 ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(12.0);
-                match dialog {
-                    AppDialog::About => {
-                        ui.heading("Haucet");
-                        ui.label(tr!("about-description"));
-                        ui.add_space(8.0);
-                        ui.label(tr!("about-version", "version" => common::version::VERSION));
-                        ui.label(LICENSE_SPDX);
-                        ui.hyperlink_to(tr!("repository-label"), REPOSITORY_URL);
-                    }
-                    AppDialog::Settings => {
-                        ui.horizontal(|ui| {
-                            ui.label(tr!("language-label"));
-                            let previous = self.settings.language;
-                            egui::ComboBox::from_id_salt("language-select")
-                                .selected_text(self.settings.language.native_name())
-                                .width(180.0)
-                                .show_ui(ui, |ui| {
-                                    for language in Language::ALL {
-                                        ui.selectable_value(
-                                            &mut self.settings.language,
-                                            language,
-                                            language.native_name(),
-                                        );
-                                    }
+                let close_button_height = 32.0;
+                let footer_gap = 20.0;
+                let body_height = (ui.available_height()
+                    - close_button_height
+                    - footer_gap
+                    - ui.spacing().item_spacing.y)
+                    .max(0.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("app-dialog-body")
+                    .auto_shrink([false, false])
+                    .max_height(body_height)
+                    .show(ui, |ui| match dialog {
+                        AppDialog::About => {
+                            ui.heading("Haucet");
+                            ui.label(tr!("about-description"));
+                            ui.add_space(8.0);
+                            ui.label(tr!("about-version", "version" => common::version::VERSION));
+                            ui.label(LICENSE_SPDX);
+                            ui.hyperlink_to(tr!("repository-label"), REPOSITORY_URL);
+                        }
+                        AppDialog::Settings => {
+                            self.language_selector(ui);
+                            ui.add_space(8.0);
+                            let transparency_changed = ui
+                                .add_enabled(
+                                    crate::vibrancy::SUPPORTED,
+                                    egui::Checkbox::new(
+                                        &mut self.settings.transparent_window,
+                                        tr!("settings-transparent-window"),
+                                    ),
+                                )
+                                .changed();
+                            if transparency_changed && self.settings.transparent_window {
+                                self.settings.dark = false;
+                            }
+                            let dark_changed = ui
+                                .add_enabled(
+                                    !self.settings.transparent_window && !self.vibrancy_enabled,
+                                    egui::Checkbox::new(
+                                        &mut self.settings.dark,
+                                        tr!("settings-dark-mode"),
+                                    ),
+                                )
+                                .on_disabled_hover_text(tr!("settings-dark-mode-unavailable"))
+                                .changed();
+                            if transparency_changed || dark_changed {
+                                ctx.set_theme(if self.settings.dark {
+                                    egui::Theme::Dark
+                                } else {
+                                    egui::Theme::Light
                                 });
-                            if self.settings.language != previous {
-                                i18n::set_language(self.settings.language);
                                 self.settings.save();
                                 ctx.request_repaint();
                             }
-                        });
-                        ui.add_space(8.0);
-                        let transparency_changed = ui
-                            .add_enabled(
-                                crate::vibrancy::SUPPORTED,
-                                egui::Checkbox::new(
-                                    &mut self.settings.transparent_window,
-                                    tr!("settings-transparent-window"),
-                                ),
-                            )
-                            .changed();
-                        if transparency_changed && self.settings.transparent_window {
-                            self.settings.dark = false;
+                            if self.settings.transparent_window
+                                != self.transparent_window_at_startup
+                            {
+                                ui.label(tr!("settings-transparency-restart"));
+                            }
                         }
-                        let dark_changed = ui
-                            .add_enabled(
-                                !self.settings.transparent_window && !self.vibrancy_enabled,
-                                egui::Checkbox::new(
-                                    &mut self.settings.dark,
-                                    tr!("settings-dark-mode"),
-                                ),
-                            )
-                            .on_disabled_hover_text(tr!("settings-dark-mode-unavailable"))
-                            .changed();
-                        if transparency_changed || dark_changed {
-                            ctx.set_theme(if self.settings.dark {
-                                egui::Theme::Dark
-                            } else {
-                                egui::Theme::Light
-                            });
-                            self.settings.save();
-                            ctx.request_repaint();
-                        }
-                        if self.settings.transparent_window != self.transparent_window_at_startup {
-                            ui.label(tr!("settings-transparency-restart"));
-                        }
-                    }
-                }
-                ui.add_space(20.0);
+                    });
+                ui.add_space(footer_gap);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add_sized([88.0, 32.0], egui::Button::new(tr!("dialog-close")))
+                        .add_sized(
+                            [88.0, close_button_height],
+                            egui::Button::new(tr!("dialog-close")),
+                        )
                         .clicked()
                     {
                         ui.close();
                     }
                 });
             });
+        if matches!(dialog, AppDialog::About)
+            && self.settings.last_seen_version.as_deref() != Some(common::version::VERSION)
+        {
+            self.settings.last_seen_version = Some(common::version::VERSION.to_owned());
+            self.settings.save();
+        }
         if response.should_close() {
             self.dialog = None;
         }

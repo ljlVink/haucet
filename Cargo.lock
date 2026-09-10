@@ -1698,6 +1698,7 @@ dependencies = [
  "image",
  "libc",
  "online-fetcher",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",

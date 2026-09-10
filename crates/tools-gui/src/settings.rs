@@ -12,6 +12,8 @@ pub struct Settings {
     #[serde(default = "default_dark")]
     pub dark: bool,
     pub transparent_window: bool,
+    pub startup_notice_accepted: bool,
+    pub last_seen_version: Option<String>,
 }
 
 fn default_dark() -> bool {

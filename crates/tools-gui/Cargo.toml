@@ -40,8 +40,10 @@ libc.workspace = true
 window-vibrancy = "0.8"
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
