@@ -1,7 +1,7 @@
 use crate::app::HaucetApp;
-use crate::fastboot_memory::MemoryMap;
 use crate::pages::{Page, ResultView, run_button};
 use crate::util::{human_size, kv, message_box, section};
+use crate::worker::fastboot::{FastbootCommand, MemoryMap};
 use eframe::egui;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -32,6 +32,7 @@ enum FastbootTab {
     Storage,
     Memory,
     Flash,
+    Command,
 }
 
 impl FastbootTab {
@@ -40,6 +41,7 @@ impl FastbootTab {
             Self::Storage => tr!("fastboot-storage-title"),
             Self::Memory => tr!("fastboot-memory-title"),
             Self::Flash => tr!("flash-image"),
+            Self::Command => tr!("fastboot-command-title"),
         }
     }
 }
@@ -48,6 +50,7 @@ impl FastbootTab {
 enum PendingOp {
     Status,
     Reboot,
+    Command(FastbootCommand),
     Extract,
     Flash,
     MemoryList,
@@ -66,6 +69,9 @@ pub struct FastbootPage {
     pub extract_result: Option<ResultView>,
     pub result: Option<ResultView>,
     pub reboot_result: Option<ResultView>,
+    command: FastbootCommand,
+    command_argument: String,
+    command_result: Option<ResultView>,
     tab: FastbootTab,
     memory_map: Option<MemoryMap>,
     selected_memory: Option<usize>,
@@ -97,6 +103,7 @@ impl FastbootPage {
                         FastbootTab::Storage,
                         FastbootTab::Memory,
                         FastbootTab::Flash,
+                        FastbootTab::Command,
                     ] {
                         ui.selectable_value(&mut self.tab, tab, tab.label());
                     }
@@ -106,6 +113,7 @@ impl FastbootPage {
                     FastbootTab::Storage => self.storage_section(ui, app),
                     FastbootTab::Memory => self.memory_section(ui, app),
                     FastbootTab::Flash => self.flash_section(ui, app),
+                    FastbootTab::Command => self.command_section(ui, app),
                 });
                 ui.add_space(20.0);
             });
@@ -227,6 +235,69 @@ impl FastbootPage {
                         });
                 }
             });
+    }
+
+    fn command_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
+        let connected = self
+            .status
+            .as_ref()
+            .is_some_and(|status| status.connected && status.devices.len() == 1);
+        ui.add_enabled_ui(!app.job_running(), |ui| {
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("fastboot-command")
+                    .selected_text(self.command.name())
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        for command in FastbootCommand::ALL {
+                            ui.selectable_value(&mut self.command, command, command.name());
+                        }
+                    });
+                let mut no_argument = String::new();
+                let input = if self.command.takes_argument() {
+                    &mut self.command_argument
+                } else {
+                    &mut no_argument
+                };
+                ui.add_enabled(
+                    self.command.takes_argument(),
+                    egui::TextEdit::singleline(input).desired_width(
+                        (ui.available_width() - 140.0 - ui.spacing().item_spacing.x).max(80.0),
+                    ),
+                );
+                let argument = self.command.argument(&self.command_argument);
+                if run_button(
+                    ui,
+                    &tr!("fastboot-command-run"),
+                    connected && argument.is_ok(),
+                    None,
+                )
+                .clicked()
+                    && let Ok(argument) = argument
+                {
+                    let argument = argument.to_owned();
+                    self.command_result = None;
+                    self.pending = Some(PendingOp::Command(self.command));
+                    app.start_job(crate::worker::JobOp::FastbootCommand {
+                        command: self.command,
+                        argument,
+                    });
+                }
+            });
+        });
+        if let Some(result) = &self.command_result {
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .id_salt("fastboot-command-result")
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    let color = if result.ok {
+                        egui::Color32::from_rgb(90, 200, 120)
+                    } else {
+                        egui::Color32::from_rgb(230, 90, 90)
+                    };
+                    message_box(ui, color, &result.summary);
+                });
+        }
     }
 
     fn storage_section(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
@@ -603,6 +674,21 @@ impl FastbootPage {
                     output: String::new(),
                 });
                 if result.ok {
+                    self.status = None;
+                    self.status_error = None;
+                }
+            }
+            PendingOp::Command(command) => {
+                self.command_result = Some(ResultView {
+                    ok: result.ok,
+                    summary: result.summary,
+                    output: String::new(),
+                });
+                if command != FastbootCommand::Getvar {
+                    self.clear_memory();
+                    self.clear_storage();
+                }
+                if command == FastbootCommand::Continue {
                     self.status = None;
                     self.status_error = None;
                 }

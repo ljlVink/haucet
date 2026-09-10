@@ -1,4 +1,6 @@
-use crate::fastboot_memory::{MemoryDevice, MemoryMap, MemoryRegion, parse_ddrdump};
+pub(crate) mod fastboot;
+
+use self::fastboot::{FastbootCommand, MemoryDevice, MemoryRegion};
 use anyhow::{Context, Result, ensure};
 use common::formats::{cpio, erofs, ext4, header::check_fmt_full};
 use common::package::{PackageFormat, UpdateLayout};
@@ -7,7 +9,7 @@ use hisi_vcom::transport::{self, SerialVcomDevice};
 use hisi_vcom::vcom;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 
 pub const WORKER_ENV: &str = "HAUCET_GUI_WORKER";
@@ -85,6 +87,10 @@ pub enum JobOp {
     },
     FastbootStatus {},
     FastbootReboot {},
+    FastbootCommand {
+        command: FastbootCommand,
+        argument: String,
+    },
     FastbootFlash {
         image: String,
         target: String,
@@ -387,11 +393,12 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
                 result,
             )
         }
-        JobOp::FastbootStatus {} => fastboot_status(),
-        JobOp::FastbootReboot {} => fastboot_reboot(),
+        JobOp::FastbootStatus {} => fastboot::status(),
+        JobOp::FastbootReboot {} => fastboot::reboot(),
+        JobOp::FastbootCommand { command, argument } => fastboot::run_command(*command, argument),
         JobOp::FastbootFlash { image, target } => {
             ensure!(!target.trim().is_empty(), "{}", tr!("partition-name-empty"));
-            fastboot_flash(Path::new(image), target.trim())
+            fastboot::flash(Path::new(image), target.trim())
         }
         JobOp::FastbootExtract { partition, output } => {
             ensure!(
@@ -399,15 +406,15 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
                 "{}",
                 tr!("partition-name-empty")
             );
-            fastboot_extract(partition.trim(), Path::new(output))
+            fastboot::extract(partition.trim(), Path::new(output))
         }
-        JobOp::FastbootMemoryList {} => fastboot_memory_list(),
+        JobOp::FastbootMemoryList {} => fastboot::memory_list(),
         JobOp::FastbootUploadMemory {
             device,
             region,
             output,
-        } => fastboot_upload_memory(device, region, Path::new(output)),
-        JobOp::FastbootStorageAnalyse {} => fastboot_storage_analyse(),
+        } => fastboot::upload_memory(device, region, Path::new(output)),
+        JobOp::FastbootStorageAnalyse {} => fastboot::storage_analyse(),
         JobOp::VcomStatus {} => vcom_status(),
         JobOp::VcomFlash {
             port,
@@ -468,340 +475,10 @@ fn vcom_flash(port: &str, address: u32, file: &Path) -> Result<WorkerResult> {
     })
 }
 
-fn fastboot_runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context(tr!("fastboot-runtime-error"))
-}
-
 fn emit_log(text: &str) {
     let line = serde_json::to_string(&serde_json::json!({ "t": "log", "s": text }))
         .expect("serializing log line");
     println!("{line}");
-}
-
-fn fastboot_status() -> Result<WorkerResult> {
-    let runtime = fastboot_runtime()?;
-    runtime.block_on(async {
-        use hm_fastboot::nusb::{DeviceSelectionError, NusbFastBoot, require_single_device};
-        let devices: Vec<_> = hm_fastboot::nusb::devices()
-            .await
-            .context(tr!("enumerate-usb-error"))?
-            .collect();
-        let list: Vec<_> = devices.iter().map(device_json).collect();
-        let info = match require_single_device(devices.into_iter()) {
-            Ok(info) => info,
-            Err(DeviceSelectionError::NotFound) => {
-                return Ok(WorkerResult {
-                    ok: true,
-                    summary: tr!("fastboot-not-found"),
-                    payload: Some(serde_json::json!({
-                        "connected": false,
-                        "devices": list,
-                    })),
-                });
-            }
-            Err(DeviceSelectionError::Multiple) => {
-                return Ok(WorkerResult {
-                    ok: true,
-                    summary: tr!("worker-fastboot-multiple-rejected"),
-                    payload: Some(serde_json::json!({
-                        "connected": false,
-                        "devices": list,
-                    })),
-                });
-            }
-        };
-
-        let mut vars = serde_json::Map::new();
-        let opened = match NusbFastBoot::from_info(&info).await {
-            Ok(mut fb) => {
-                for var in ["product", "serialno", "version", "max-download-size"] {
-                    match fb.get_var(var).await {
-                        Ok(value) => {
-                            vars.insert(var.to_owned(), serde_json::Value::String(value));
-                        }
-                        Err(error) => emit_log(&tr!("fastboot-getvar-error", "variable" => var, "error" => error.to_string())),
-                    }
-                }
-                true
-            }
-            Err(error) => {
-                emit_log(&tr!("open-device-error", "error" => format!("{error:#}")));
-                false
-            }
-        };
-
-        let product = vars
-            .get("product")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .unwrap_or_else(|| tr!("unknown-device"));
-        Ok(WorkerResult {
-            ok: true,
-            summary: if opened {
-                tr!("worker-fastboot-connected", "product" => product)
-            } else {
-                tr!("worker-fastboot-cannot-open")
-            },
-            payload: Some(serde_json::json!({
-                "connected": opened,
-                "devices": list,
-                "vars": vars,
-            })),
-        })
-    })
-}
-
-fn fastboot_reboot() -> Result<WorkerResult> {
-    let runtime = fastboot_runtime()?;
-    runtime.block_on(async {
-        use hm_fastboot::nusb::NusbFastBoot;
-
-        let devices = hm_fastboot::nusb::devices()
-            .await
-            .context(tr!("enumerate-usb-error"))?;
-        let info = single_fastboot_device(devices)?;
-        let mut fb = NusbFastBoot::from_info(&info)
-            .await
-            .context(tr!("open-fastboot-device-error"))?;
-        fb.reboot().await.context(tr!("fastboot-reboot-error"))?;
-
-        Ok(WorkerResult {
-            ok: true,
-            summary: tr!("worker-reboot-sent"),
-            payload: None,
-        })
-    })
-}
-
-fn device_json(info: &hm_fastboot::nusb::DeviceInfo) -> serde_json::Value {
-    use hm_fastboot::nusb::clean_device_string;
-
-    serde_json::json!({
-        "bus": info.bus_id(),
-        "addr": info.device_address(),
-        "vid": format!("{:04x}", info.vendor_id()),
-        "pid": format!("{:04x}", info.product_id()),
-        "product": info
-            .product_string()
-            .map(|s| clean_device_string(s).unwrap_or_else(|| s.to_owned()))
-            .unwrap_or_default(),
-        "serial": info
-            .serial_number()
-            .map(|s| clean_device_string(s).unwrap_or_else(|| s.to_owned()))
-            .unwrap_or_default(),
-    })
-}
-
-fn fastboot_flash(image: &Path, target: &str) -> Result<WorkerResult> {
-    let runtime = fastboot_runtime()?;
-    runtime.block_on(async {
-        use hm_fastboot::nusb::{FlashEvent, NusbFastBoot};
-        let devices = hm_fastboot::nusb::devices()
-            .await
-            .context(tr!("enumerate-usb-error"))?;
-        let info = single_fastboot_device(devices)?;
-        let mut fb = NusbFastBoot::from_info(&info)
-            .await
-            .context(tr!("open-fastboot-device-error"))?;
-
-        let mut progress = |event: FlashEvent<'_>| match event {
-            FlashEvent::Message(msg) => emit_log(msg),
-            FlashEvent::Part { index, total } => {
-                emit_log(&tr!("flash-part-progress", "index" => index, "total" => total));
-            }
-        };
-        fb.flash_image(target, image, &mut progress)
-            .await
-            .with_context(|| tr!("flash-image-error", "image" => image.display().to_string(), "target" => target.to_owned()))?;
-        Ok(WorkerResult {
-            ok: true,
-            summary: tr!("worker-image-flashed", "image" => image.display().to_string(), "target" => target.to_owned()),
-            payload: None,
-        })
-    })
-}
-
-fn fastboot_extract(partition: &str, output: &Path) -> Result<WorkerResult> {
-    let runtime = fastboot_runtime()?;
-    runtime.block_on(async {
-        use hm_fastboot::nusb::{ExtractPartEvent, NusbFastBoot};
-
-        let devices = hm_fastboot::nusb::devices()
-            .await
-            .context(tr!("enumerate-usb-error"))?;
-        let info = single_fastboot_device(devices)?;
-        let mut fb = NusbFastBoot::from_info(&info)
-            .await
-            .context(tr!("open-fastboot-device-error"))?;
-
-        let mut progress = |event| match event {
-            ExtractPartEvent::Started(range) => emit_log(&tr!(
-                "extract-part-range",
-                "partition" => partition.to_owned(),
-                "offset" => format!("0x{:x}", range.offset),
-                "length" => format!("0x{:x}", range.length),
-            )),
-            ExtractPartEvent::Progress { written, total } => emit_log(&tr!(
-                "extract-part-progress",
-                "written" => written,
-                "total" => total,
-            )),
-        };
-        let range = fb
-            .extract_part(partition, output, &mut progress)
-            .await
-            .with_context(|| {
-                tr!(
-                    "extract-part-error",
-                    "partition" => partition.to_owned(),
-                    "output" => output.display().to_string(),
-                )
-            })?;
-        Ok(WorkerResult {
-            ok: true,
-            summary: tr!(
-                "worker-partition-extracted",
-                "partition" => partition.to_owned(),
-                "output" => output.display().to_string(),
-                "length" => range.length,
-            ),
-            payload: None,
-        })
-    })
-}
-
-async fn read_memory_map(fb: &mut hm_fastboot::nusb::NusbFastBoot) -> Result<Vec<MemoryRegion>> {
-    let lines = fb
-        .oem("ddrdump")
-        .await
-        .context(tr!("fastboot-memory-list-error"))?;
-    for line in &lines {
-        emit_log(line);
-    }
-    parse_ddrdump(&lines.join("\n"))
-}
-
-fn fastboot_memory_list() -> Result<WorkerResult> {
-    let runtime = fastboot_runtime()?;
-    runtime.block_on(async {
-        let devices = hm_fastboot::nusb::devices()
-            .await
-            .context(tr!("enumerate-usb-error"))?;
-        let info = single_fastboot_device(devices)?;
-        let mut fb = hm_fastboot::nusb::NusbFastBoot::from_info(&info)
-            .await
-            .context(tr!("open-fastboot-device-error"))?;
-        let regions = read_memory_map(&mut fb).await?;
-        summary_payload(
-            tr!("fastboot-memory-listed", "count" => regions.len()),
-            MemoryMap {
-                device: MemoryDevice::from_info(&info),
-                regions,
-            },
-        )
-    })
-}
-
-fn fastboot_upload_memory(
-    device: &MemoryDevice,
-    region: &MemoryRegion,
-    output: &Path,
-) -> Result<WorkerResult> {
-    region.validate()?;
-    let runtime = fastboot_runtime()?;
-    let mut fb = runtime.block_on(async {
-        let devices = hm_fastboot::nusb::devices()
-            .await
-            .context(tr!("enumerate-usb-error"))?;
-        let info = single_fastboot_device(devices)?;
-        ensure!(
-            &MemoryDevice::from_info(&info) == device,
-            "{}",
-            tr!("fastboot-memory-device-changed")
-        );
-        let mut fb = hm_fastboot::nusb::NusbFastBoot::from_info(&info)
-            .await
-            .context(tr!("open-fastboot-device-error"))?;
-        ensure!(
-            read_memory_map(&mut fb).await?.contains(region),
-            "{}",
-            tr!("fastboot-memory-region-changed")
-        );
-        Ok::<_, anyhow::Error>(fb)
-    })?;
-
-    // Keep memory usage bounded and publish only a complete download. A unique
-    // worker label also allows retrying after the worker was forcibly cancelled.
-    fs_util::atomic_write(output, &format!("memory-{}", std::process::id()), |writer| {
-        runtime.block_on(async {
-            let mut written = 0u64;
-            for (address, length) in region.chunks() {
-                let params = format!("0x{address:x}:0x{length:x}");
-                let data = fb.upload_memory(&params, length).await?;
-                ensure!(data.len() == length as usize, "{}", tr!("fastboot-memory-short-read"));
-                writer.write_all(&data)?;
-                written += u64::from(length);
-                emit_log(&tr!("fastboot-memory-progress", "written" => written, "total" => region.size));
-            }
-            Ok(())
-        })
-    })
-    .with_context(|| tr!("fastboot-memory-download-error", "name" => region.name.clone(), "output" => output.display().to_string()))?;
-    Ok(WorkerResult {
-        ok: true,
-        summary: tr!("fastboot-memory-downloaded", "name" => region.name.clone(), "output" => output.display().to_string(), "length" => region.size),
-        payload: None,
-    })
-}
-
-fn fastboot_storage_analyse() -> Result<WorkerResult> {
-    let runtime = fastboot_runtime()?;
-    runtime.block_on(async {
-        let devices = hm_fastboot::nusb::devices()
-            .await
-            .context(tr!("enumerate-usb-error"))?;
-        let info = single_fastboot_device(devices)?;
-        let mut fb = hm_fastboot::nusb::NusbFastBoot::from_info(&info)
-            .await
-            .context(tr!("open-fastboot-device-error"))?;
-        let head = fb
-            .read_storage_head()
-            .await
-            .context(tr!("fastboot-storage-head-error"))?;
-        let gpt = common::formats::gpt::parse_storage_head(&head)
-            .context(tr!("fastboot-storage-parse-error"))?;
-        ensure!(
-            !gpt.tables.is_empty(),
-            "{}",
-            tr!("fastboot-storage-no-table")
-        );
-
-        emit_log(&tr!(
-            "fastboot-storage-header",
-            "offset" => format!("0x{:X}", gpt.tables[0].image_offset),
-            "block" => gpt.tables[0].block_size,
-        ));
-        summary_payload(
-            tr!("fastboot-storage-listed", "count" => gpt.partition_count()),
-            gpt,
-        )
-    })
-}
-
-fn single_fastboot_device<T>(devices: impl Iterator<Item = T>) -> Result<T> {
-    use hm_fastboot::nusb::{DeviceSelectionError, require_single_device};
-
-    require_single_device(devices).map_err(|error| match error {
-        DeviceSelectionError::NotFound => {
-            anyhow::anyhow!(tr!("fastboot-device-required"))
-        }
-        DeviceSelectionError::Multiple => {
-            anyhow::anyhow!(tr!("fastboot-single-device-required"))
-        }
-    })
 }
 
 fn probe_ramdisk(image: &Path) -> Result<serde_json::Value> {

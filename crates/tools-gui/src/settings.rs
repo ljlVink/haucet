@@ -26,7 +26,7 @@ impl Settings {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        settings.transparent_window &= crate::vibrancy::SUPPORTED;
+        settings.transparent_window &= crate::window::TRANSPARENCY_SUPPORTED;
         if settings.transparent_window {
             settings.dark = false;
         }

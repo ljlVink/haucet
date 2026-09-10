@@ -5,15 +5,12 @@ mod i18n;
 
 mod app;
 mod detect;
-mod fastboot_memory;
 mod fonts;
 mod job;
 mod pages;
 mod settings;
 mod util;
-mod vibrancy;
-#[cfg(windows)]
-mod window_frame;
+mod window;
 mod worker;
 
 use app::HaucetApp;

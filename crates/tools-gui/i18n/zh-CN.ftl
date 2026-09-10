@@ -262,6 +262,12 @@ entropy-window-samples = 窗口 {$window} · {$count} 个采样点
 entropy-chart-hint = 横轴：文件偏移；纵轴：Shannon 熵（bits/byte）
 
 fastboot-devices = Fastboot 设备
+fastboot-command-title = 运行命令
+fastboot-command-run = 运行
+fastboot-command-invalid-argument = 参数不能为空或包含控制字符；getvar 和 erase 的参数不能包含空白。
+fastboot-command-error = 执行 fastboot {$command} 失败
+fastboot-command-done = 已执行 fastboot {$command}
+job-fastboot-command = 运行 fastboot {$command}
 detect-device = 检测设备连接
 fastboot-detect-hint = 重新枚举 USB 设备并查询 fastboot 变量
 reboot-device = 重启设备

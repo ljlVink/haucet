@@ -262,6 +262,12 @@ entropy-window-samples = Окно {$window} · выборок: {$count}
 entropy-chart-hint = Горизонталь: смещение в файле; вертикаль: энтропия Шеннона (бит/байт)
 
 fastboot-devices = Устройства Fastboot
+fastboot-command-title = Выполнить команду
+fastboot-command-run = Выполнить
+fastboot-command-invalid-argument = Аргумент не должен быть пустым или содержать управляющие символы; аргументы getvar и erase не должны содержать пробельные символы.
+fastboot-command-error = Не удалось выполнить fastboot {$command}
+fastboot-command-done = Выполнена команда fastboot {$command}
+job-fastboot-command = Выполнить fastboot {$command}
 detect-device = Найти устройство
 fastboot-detect-hint = Повторно найти USB-устройства и запросить переменные fastboot
 reboot-device = Перезагрузить

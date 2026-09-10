@@ -95,7 +95,8 @@ impl HaucetApp {
             egui::Theme::Light
         });
         let transparent_window_at_startup = settings.transparent_window;
-        let vibrancy_enabled = transparent_window_at_startup && crate::vibrancy::apply(cc);
+        let vibrancy_enabled =
+            transparent_window_at_startup && crate::window::apply_transparency(cc);
         let dialog = (settings.last_seen_version.as_deref() != Some(common::version::VERSION))
             .then_some(AppDialog::About);
         Self {
@@ -136,7 +137,7 @@ impl eframe::App for HaucetApp {
             }));
             #[cfg(windows)]
             if !self.vibrancy_enabled {
-                crate::window_frame::apply(_frame, &ctx.global_style().visuals);
+                crate::window::apply_frame_colors(_frame, &ctx.global_style().visuals);
             }
             self.native_theme = Some(theme);
         }
@@ -548,7 +549,7 @@ impl HaucetApp {
                             ui.add_space(8.0);
                             let transparency_changed = ui
                                 .add_enabled(
-                                    crate::vibrancy::SUPPORTED,
+                                    crate::window::TRANSPARENCY_SUPPORTED,
                                     egui::Checkbox::new(
                                         &mut self.settings.transparent_window,
                                         tr!("settings-transparent-window"),
@@ -768,6 +769,7 @@ fn job_label(op: &JobOp) -> String {
         PartitionInfo { .. } => tr!("job-partition-info"),
         FastbootStatus { .. } => tr!("job-fastboot-status"),
         FastbootReboot { .. } => tr!("job-fastboot-reboot"),
+        FastbootCommand { command, .. } => tr!("job-fastboot-command", "command" => command.name()),
         FastbootFlash { .. } => tr!("job-fastboot-flash"),
         FastbootExtract { .. } => tr!("job-fastboot-extract"),
         FastbootMemoryList { .. } => tr!("job-fastboot-memory-list"),
@@ -793,9 +795,9 @@ fn result_owner(op: &JobOp, current: Page) -> ResultOwner {
         | JobOp::RamdiskPatch { .. }
         | JobOp::RamdiskProbe { .. } => ResultOwner::Image(ImageKind::Ramdisk),
         JobOp::PartitionInfo { .. } => ResultOwner::Image(ImageKind::Partition),
-        JobOp::FastbootMemoryList { .. } | JobOp::FastbootUploadMemory { .. } => {
-            ResultOwner::Page(Page::Fastboot)
-        }
+        JobOp::FastbootMemoryList { .. }
+        | JobOp::FastbootUploadMemory { .. }
+        | JobOp::FastbootCommand { .. } => ResultOwner::Page(Page::Fastboot),
         _ => ResultOwner::Page(current),
     }
 }

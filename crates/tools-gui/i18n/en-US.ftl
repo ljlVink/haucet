@@ -262,6 +262,12 @@ entropy-window-samples = Window {$window} · {$count} samples
 entropy-chart-hint = Horizontal: file offset; vertical: Shannon entropy (bits/byte)
 
 fastboot-devices = Fastboot devices
+fastboot-command-title = Run command
+fastboot-command-run = Run
+fastboot-command-invalid-argument = The argument must be nonempty and contain no control characters; getvar and erase arguments must not contain whitespace.
+fastboot-command-error = Failed to execute fastboot {$command}
+fastboot-command-done = Executed fastboot {$command}
+job-fastboot-command = Run fastboot {$command}
 detect-device = Detect device
 fastboot-detect-hint = Rescan USB devices and query fastboot variables
 reboot-device = Reboot device
