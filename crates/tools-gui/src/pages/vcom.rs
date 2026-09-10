@@ -128,17 +128,15 @@ impl VcomPage {
             .unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(tr!("serial-port")).strong());
-            ui.add(
-                egui::TextEdit::singleline(&mut self.port)
-                    .hint_text("COM3")
-                    .desired_width(140.0),
-            );
             egui::ComboBox::from_id_salt("vcom-port-select")
-                .selected_text(if self.port.trim().is_empty() {
-                    tr!("choose-serial-port")
-                } else {
-                    self.port.trim().to_owned()
-                })
+                .width(180.0)
+                .selected_text(
+                    choices
+                        .iter()
+                        .find(|choice| choice.name == self.port)
+                        .map(|choice| choice.name.clone())
+                        .unwrap_or_else(|| tr!("choose-serial-port")),
+                )
                 .show_ui(ui, |ui| {
                     for choice in &choices {
                         ui.selectable_value(
@@ -148,9 +146,7 @@ impl VcomPage {
                         );
                     }
                 });
-        });
-
-        ui.horizontal(|ui| {
+            ui.add_space(12.0);
             ui.label(egui::RichText::new(tr!("address")).strong());
             ui.add(
                 egui::TextEdit::singleline(&mut self.address)
@@ -185,7 +181,7 @@ impl VcomPage {
         ui.add_space(6.0);
         let parsed_address = parse_address(self.address.trim());
         let ready = !app.job_running()
-            && !self.port.trim().is_empty()
+            && choices.iter().any(|choice| choice.name == self.port)
             && !self.file.trim().is_empty()
             && parsed_address.is_ok();
         if run_button(
