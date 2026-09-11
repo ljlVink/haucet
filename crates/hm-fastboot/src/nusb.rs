@@ -178,6 +178,7 @@ pub struct NusbFastBoot {
 
 const HARMONY_BOOT_ID: &[(u16, u16)] = &[(0x12d1, 0x1100), (0x12d1, 0x1101)];
 const EXTRACT_PART_CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+const DOWNLOAD_CHUNK_SIZE: u32 = 1024 * 1024;
 
 impl NusbFastBoot {
     pub fn find_fastboot_interface(info: &DeviceInfo) -> Option<u8> {
@@ -630,6 +631,26 @@ impl NusbFastBoot {
         path: &Path,
         progress: &mut dyn FnMut(FlashEvent<'_>),
     ) -> Result<(), FlashError> {
+        match self.ultraflash(target).await {
+            Ok(()) => {
+                progress(FlashEvent::Message("Using Ultraflash protocol"));
+                let file = std::fs::File::open(path)?;
+                let file_len = file.metadata()?.len();
+                let file_size =
+                    u32::try_from(file_len).map_err(|_| FlashError::TooLarge(file_len))?;
+                let download_result = ultraflash_raw(self, file, file_size, progress).await;
+                let stop_result = self.ultraflash_stop().await;
+                download_result?;
+                stop_result?;
+                return Ok(());
+            }
+            Err(NusbFastBootError::FastbootFailed(_)) => {
+                progress(FlashEvent::Message(
+                    "Ultraflash is not supported; using standard fastboot flash",
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
         let max_download = self.get_var("max-download-size").await?;
         let max_download = parse_u32(&max_download).map_err(|e| {
             NusbFastBootError::FastbootFailed(format!(
@@ -718,6 +739,8 @@ pub enum FlashError {
     Download(#[from] DownloadError),
     #[error("Fastboot transfer failed: {0}")]
     Fastboot(#[from] NusbFastBootError),
+    #[error("Image too large for ultraflash download: {0} bytes")]
+    TooLarge(u64),
 }
 
 async fn flash_raw(
@@ -741,6 +764,27 @@ async fn flash_raw(
 
     progress(FlashEvent::Message("Flashing data"));
     fb.flash(target).await?;
+    Ok(())
+}
+
+async fn ultraflash_raw(
+    fb: &mut NusbFastBoot,
+    mut file: std::fs::File,
+    file_size: u32,
+    progress: &mut dyn FnMut(FlashEvent<'_>),
+) -> Result<(), FlashError> {
+    let mut sender = fb.download(file_size).await?;
+    loop {
+        let left = sender.left();
+        if left == 0 {
+            break;
+        }
+        let amount = left.min(DOWNLOAD_CHUNK_SIZE) as usize;
+        let buf = sender.get_mut_data(amount).await?;
+        file.read_exact(buf)?;
+    }
+    sender.finish().await?;
+    progress(FlashEvent::Message("Flashing data"));
     Ok(())
 }
 

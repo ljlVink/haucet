@@ -1,10 +1,9 @@
 use anyhow::{Context, Result, bail};
 use hm_fastboot::nusb::{
-    ExtractPartEvent, FlashEvent, NusbFastBoot, NusbFastBootError, clean_device_string,
-    require_single_device,
+    ExtractPartEvent, FlashEvent, NusbFastBoot, clean_device_string, require_single_device,
 };
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 pub async fn devices() -> Result<()> {
@@ -45,35 +44,6 @@ pub async fn get_var(var: &str) -> Result<()> {
 pub async fn flash(partition: &str, image: &Path) -> Result<()> {
     let mut fb = open_only().await?;
 
-    match fb.ultraflash(partition).await {
-        Ok(()) => {
-            println!("Using Ultraflash protocol!");
-            let download_result = download_image(&mut fb, image).await;
-            let stop_result = fb.ultraflash_stop().await;
-
-            if let Err(error) = download_result {
-                return match stop_result {
-                    Ok(()) => Err(error),
-                    Err(stop_error) => Err(anyhow::anyhow!(
-                        "failed to download {}: {error}; additionally failed to stop ultraflash: {stop_error}",
-                        image.display()
-                    )),
-                };
-            }
-            stop_result.context("failed to stop ultraflash mode")?;
-            println!("Flash completed");
-            return Ok(());
-        }
-        Err(NusbFastBootError::FastbootFailed(_)) => {
-            println!("Ultraflash is not supported; using standard fastboot flash");
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!("failed to probe ultraflash support for partition {partition}")
-            });
-        }
-    }
-
     let mut progress = |event: FlashEvent<'_>| match event {
         FlashEvent::Message(msg) => println!("{msg}"),
         FlashEvent::Part { index, total } => println!("Progress: {index}/{total} parts completed"),
@@ -82,37 +52,6 @@ pub async fn flash(partition: &str, image: &Path) -> Result<()> {
         .await
         .with_context(|| format!("failed to flash {} to {}", image.display(), partition))?;
     println!("Flash completed");
-    Ok(())
-}
-
-async fn download_image(fb: &mut NusbFastBoot, image: &Path) -> Result<()> {
-    let mut file = File::open(image)
-        .with_context(|| format!("failed to open download image {}", image.display()))?;
-    let size = u32::try_from(
-        file.metadata()
-            .with_context(|| format!("failed to stat download image {}", image.display()))?
-            .len(),
-    )
-    .with_context(|| format!("download image is larger than 4 GiB: {}", image.display()))?;
-
-    let mut sender = fb
-        .download(size)
-        .await
-        .with_context(|| format!("failed to start download of {}", image.display()))?;
-    while sender.left() > 0 {
-        let amount = sender.left().min(1024 * 1024) as usize;
-        let buffer = sender
-            .get_mut_data(amount)
-            .await
-            .context("failed to allocate fastboot download buffer")?;
-        file.read_exact(buffer)
-            .with_context(|| format!("failed to read download image {}", image.display()))?;
-    }
-    sender
-        .finish()
-        .await
-        .with_context(|| format!("failed to finish download of {}", image.display()))?;
-    println!("Downloaded {} ({} bytes)", image.display(), size);
     Ok(())
 }
 
