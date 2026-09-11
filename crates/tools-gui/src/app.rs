@@ -7,8 +7,6 @@ use crate::worker::JobOp;
 use eframe::egui;
 use std::path::PathBuf;
 
-const LICENSE_SPDX: &str = env!("CARGO_PKG_LICENSE");
-const REPOSITORY_URL: &str = "https://github.com/ljlVink/haucet";
 const APP_DIALOG_SIZE: egui::Vec2 = egui::vec2(360.0, 260.0);
 
 pub(crate) struct HaucetApp {
@@ -520,8 +518,8 @@ impl HaucetApp {
                         ui.add_space(8.0);
                         ui.label(tr!("startup-notice-warranty"));
                         ui.add_space(8.0);
-                        ui.label(tr!("startup-notice-license", "license" => LICENSE_SPDX));
-                        ui.hyperlink_to(tr!("repository-label"), REPOSITORY_URL);
+                        ui.label(tr!("startup-notice-license", "license" => common::version::LICENSE_SPDX));
+                        ui.hyperlink_to(tr!("repository-label"), common::version::REPOSITORY_URL);
                     });
 
                 ui.add_space(12.0);
@@ -593,8 +591,11 @@ impl HaucetApp {
                             ui.label(tr!("about-description"));
                             ui.add_space(8.0);
                             ui.label(tr!("about-version", "version" => common::version::VERSION));
-                            ui.label(LICENSE_SPDX);
-                            ui.hyperlink_to(tr!("repository-label"), REPOSITORY_URL);
+                            ui.label(common::version::LICENSE_SPDX);
+                            ui.hyperlink_to(
+                                tr!("repository-label"),
+                                common::version::REPOSITORY_URL,
+                            );
                         }
                         AppDialog::Settings => {
                             self.language_selector(ui);

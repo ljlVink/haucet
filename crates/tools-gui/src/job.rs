@@ -1,6 +1,5 @@
 use crate::worker::{self, JobOp, JobSpec, WorkerResult};
 use anyhow::{Context, Result};
-use common::process::hide_command_window;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -8,6 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[derive(Debug, Clone)]
 pub enum JobEvent {
@@ -57,7 +59,11 @@ pub fn start(op: JobOp) -> Result<RunningJob> {
     let json = serde_json::to_string(&spec)?;
     let mut command =
         Command::new(std::env::current_exe().context(tr!("locate-executable-error"))?);
-    hide_command_window(&mut command);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     command
         .env(worker::WORKER_ENV, "1")
         .env(crate::i18n::LANGUAGE_ENV, crate::i18n::language().tag())

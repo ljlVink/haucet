@@ -1,6 +1,5 @@
 use super::hvb::{HvbCert, HvbFooter, HvbWrapper};
 use crate::fs_util;
-use crate::tools::ToolPaths;
 use anyhow::{Context, Result, ensure};
 use erofs::{BuildOptions, ExtractOptions};
 use serde::{Deserialize, Serialize};
@@ -117,16 +116,6 @@ pub fn unpack(image: &Path, out: &Path, force: bool) -> Result<()> {
     write_manifest(out, &manifest)?;
     eprintln!("wrote {}", out.join(MANIFEST_NAME).display());
     Ok(())
-}
-
-/// Compatibility entry point; repacking uses the embedded Rust writer.
-pub fn repack_with_tools(
-    workspace: &Path,
-    output: &Path,
-    _tools: &ToolPaths,
-    allow_grow: bool,
-) -> Result<()> {
-    repack(workspace, output, allow_grow)
 }
 
 pub fn repack(workspace: &Path, output: &Path, allow_grow: bool) -> Result<()> {

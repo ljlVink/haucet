@@ -7,8 +7,6 @@ pub mod nvme;
 pub mod oeminfo;
 pub mod package;
 pub mod partition;
-pub mod process;
 pub mod ramdisk;
 pub mod splituapp;
-pub mod tools;
 pub mod version;
