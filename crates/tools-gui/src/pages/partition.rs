@@ -354,28 +354,96 @@ impl PartitionPage {
             );
         }
 
-        section(ui, &tr!("x509-certificate-chain"));
-        for certificate in &secimg.certificates {
-            ui.label(
-                egui::RichText::new(format!(
-                    "#{}  0x{:X} + 0x{:X}  {}",
-                    certificate.chain_index + 1,
-                    certificate.offset,
-                    certificate.size,
-                    certificate.subject
-                ))
-                .monospace(),
+        for (index, stage) in secimg.stages.iter().enumerate() {
+            section(
+                ui,
+                &tr!("secimg-stage", "index" => index + 1, "count" => secimg.stages.len()),
             );
+            egui::Grid::new(format!("secimg-stage-grid-{index}"))
+                .num_columns(2)
+                .spacing([18.0, 6.0])
+                .show(ui, |ui| {
+                    kv(ui, &tr!("component-name"), &stage.image_name);
+                    kv(ui, &tr!("target-partition"), &stage.partition_name);
+                    kv(
+                        ui,
+                        &tr!("certificate-group"),
+                        format!(
+                            "0x{:X} + 0x{:X}",
+                            stage.certificate_group_offset, stage.certificate_chain_size
+                        ),
+                    );
+                    if stage.authenticates_prefix {
+                        kv(
+                            ui,
+                            &tr!("authenticates-prefix"),
+                            format!("data[0x0..0x{:X}]", stage.certificate_group_offset),
+                        );
+                    } else {
+                        kv(
+                            ui,
+                            &tr!("payload-offset"),
+                            crate::util::hex64(stage.payload_offset),
+                        );
+                        kv(ui, &tr!("payload-size"), human_size(stage.payload_size));
+                    }
+                    kv(
+                        ui,
+                        &tr!("payload-sha256"),
+                        if stage.payload_hash_valid {
+                            tr!("verification-passed")
+                        } else {
+                            tr!("mismatch")
+                        },
+                    );
+                    kv(
+                        ui,
+                        &tr!("inner-certificates"),
+                        tr!("inner-certificates-count", "count" => stage.inner_certificates.len()),
+                    );
+                });
             ui.label(
-                egui::RichText::new(tr!(
-                    "certificate-validity",
-                    "from" => certificate.not_before.clone(),
-                    "to" => certificate.not_after.clone(),
-                    "algorithm" => certificate.signature_algorithm_oid.clone(),
-                ))
-                .weak()
-                .small(),
+                egui::RichText::new(&stage.declared_payload_sha256)
+                    .monospace()
+                    .small(),
             );
+
+            section(ui, &tr!("x509-certificate-chain"));
+            for certificate in &stage.certificates {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "#{}  0x{:X} + 0x{:X}  {}",
+                        certificate.chain_index + 1,
+                        certificate.offset,
+                        certificate.size,
+                        certificate.subject
+                    ))
+                    .monospace(),
+                );
+                ui.label(
+                    egui::RichText::new(tr!(
+                        "certificate-validity",
+                        "from" => certificate.not_before.clone(),
+                        "to" => certificate.not_after.clone(),
+                        "algorithm" => certificate.signature_algorithm_oid.clone(),
+                    ))
+                    .weak()
+                    .small(),
+                );
+            }
+            for certificate in &stage.inner_certificates {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  0x{:X} + 0x{:X}  {}",
+                        tr!("inner-certificate"),
+                        certificate.offset,
+                        certificate.size,
+                        certificate.subject
+                    ))
+                    .monospace()
+                    .weak(),
+                );
+            }
         }
     }
 

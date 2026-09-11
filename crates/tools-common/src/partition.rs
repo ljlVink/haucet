@@ -300,19 +300,74 @@ fn print_secimg_summary(summary: &secimg::SecImageInfo) {
             "MISMATCH"
         }
     );
-    eprintln!("--- X.509 certificate chain ---");
-    for certificate in &summary.certificates {
+    for (index, stage) in summary.stages.iter().enumerate() {
+        let label = if summary.stages.len() == 1 {
+            "stage 1".to_owned()
+        } else {
+            format!(
+                "stage {} ({}:{})",
+                index + 1,
+                stage.image_name,
+                stage.partition_name
+            )
+        };
+        eprintln!("--- {label} ---");
         eprintln!(
-            "  #{} offset=0x{:X} size=0x{:X} subject={:?}",
-            certificate.chain_index + 1,
-            certificate.offset,
-            certificate.size,
-            certificate.subject
+            "  certificate_group     = 0x{:X} + 0x{:X}",
+            stage.certificate_group_offset, stage.certificate_chain_size
         );
+        if !stage.inner_certificates.is_empty() {
+            eprintln!(
+                "  inner_certificates    = {} at 0x{:X}..0x{:X}",
+                stage.inner_certificates.len(),
+                stage.inner_certificates[0].offset,
+                stage
+                    .inner_certificates
+                    .last()
+                    .map(|c| c.offset + c.size)
+                    .unwrap_or(0)
+            );
+        }
+        if stage.authenticates_prefix {
+            eprintln!(
+                "  authenticates_prefix  = data[0x0..0x{:X}]",
+                stage.certificate_group_offset
+            );
+        } else {
+            eprintln!(
+                "  payload               = 0x{:X} + 0x{:X}",
+                stage.payload_offset, stage.payload_size
+            );
+        }
         eprintln!(
-            "     validity={} .. {} signature={}",
-            certificate.not_before, certificate.not_after, certificate.signature_algorithm_oid
+            "  payload_sha256        = {} ({})",
+            stage.declared_payload_sha256,
+            if stage.payload_hash_valid {
+                "verified"
+            } else {
+                "MISMATCH"
+            }
         );
+        eprintln!("  --- X.509 certificate chain ---");
+        for certificate in &stage.certificates {
+            eprintln!(
+                "  #{} offset=0x{:X} size=0x{:X} subject={:?}",
+                certificate.chain_index + 1,
+                certificate.offset,
+                certificate.size,
+                certificate.subject
+            );
+            eprintln!(
+                "     validity={} .. {} signature={}",
+                certificate.not_before, certificate.not_after, certificate.signature_algorithm_oid
+            );
+        }
+        for certificate in &stage.inner_certificates {
+            eprintln!(
+                "  inner offset=0x{:X} size=0x{:X} subject={:?}",
+                certificate.offset, certificate.size, certificate.subject
+            );
+        }
     }
     for warning in &summary.warnings {
         eprintln!("  WARN: {warning}");

@@ -490,7 +490,15 @@ verification-passed = Verification passed
 mismatch = Mismatch
 actual-value = Actual: {$value}
 x509-certificate-chain = X.509 certificate chain
-certificate-validity = Valid from {$from} to {$to} | {$algorithm}
+certificate-group = Certificate group
+inner-certificates = Inner certificates
+inner-certificates-count = {$count ->
+    [one] {$count} certificate
+   *[other] {$count} certificates
+}
+inner-certificate = Inner
+secimg-stage = Stage {$index} of {$count}
+authenticates-prefix = Authenticates file prefix
 keys-per-partition = Keys per partition
 legacy-zero-as-one = 0 (legacy; treated as 1)
 descriptor-count = Descriptor count

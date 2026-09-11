@@ -490,7 +490,16 @@ verification-passed = Проверка пройдена
 mismatch = Не совпадает
 actual-value = Фактическое значение: {$value}
 x509-certificate-chain = Цепочка сертификатов X.509
-certificate-validity = Действителен с {$from} до {$to} | {$algorithm}
+certificate-group = Группа сертификатов
+inner-certificates = Внутренние сертификаты
+inner-certificates-count = {$count ->
+    [one] {$count} сертификат
+    [few] {$count} сертификата
+   *[other] {$count} сертификатов
+}
+inner-certificate = Внутренний
+secimg-stage = Этап {$index} из {$count}
+authenticates-prefix = Аутентифицирует префикс файла
 keys-per-partition = Ключей на раздел
 legacy-zero-as-one = 0 (старый формат; считается как 1)
 descriptor-count = Дескрипторов
