@@ -16,3 +16,8 @@ haucet*.exe
 loader*
 *.bat
 *.pdf
+.ida-mcp
+work_*
+*.ini
+*_*.bin
+*_*.txt

@@ -352,7 +352,7 @@ OEM 扩展命令与 Getvar 变量.
 
 == 地址读写实测
 
-本次通过 OEM `read` / `write` 完成“读取原值 → 写入测试值 → 再次读取”的验证.地址 `0x10CFC0` 初始返回 `0x00000000`, 写入后返回 `0x11451419`; 不仅写入命令显示完成, 后续读回值也与测试值一致.
+OEM `read` / `write` 完成“读取原值 → 写入测试值 → 再次读取”的验证.地址 `0x10CFC0` 初始返回 `0x00000000`, 写入后返回 `0x11451419`; 不仅写入命令显示完成, 后续读回值也与测试值一致.
 
 ```text
 haucet fastboot oem read 0x10CFC0
@@ -360,7 +360,7 @@ Using device PCIROOT(0)#PCI(1400)#USBROOT(0):21 ()
  0x0010CFC0: 0x00000000
 OEM command completed
 
-haucet fastboot oem write 0x10CFC0\@0x11451419
+haucet fastboot oem write 0x10CFC0@0x11451419
 Using device PCIROOT(0)#PCI(1400)#USBROOT(0):21 ()
 OEM command completed
 
