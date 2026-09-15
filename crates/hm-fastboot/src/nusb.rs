@@ -18,8 +18,10 @@ use crate::protocol::{FastBootCommand, FastBootResponseParseError};
 use crate::protocol::{FastBootResponse, parse_u32};
 use crate::sparse::{
     CHUNK_HEADER_BYTES_LEN, ChunkHeader, FileHeader, FileHeaderBytes, ParseError, SplitError,
-    split_image, split_raw,
+    split_image, split_raw, usable_download_size,
 };
+
+const DEFAULT_MAX_DOWNLOAD: u32 = 256 * 1024 * 1024;
 
 pub async fn devices() -> Result<impl Iterator<Item = DeviceInfo>, nusb::Error> {
     Ok(nusb::list_devices()
@@ -631,11 +633,11 @@ impl NusbFastBoot {
         path: &Path,
         progress: &mut dyn FnMut(FlashEvent<'_>),
     ) -> Result<(), FlashError> {
+        let mut file = std::fs::File::open(path)?;
+        let file_len = file.metadata()?.len();
         match self.ultraflash(target).await {
             Ok(()) => {
                 progress(FlashEvent::Message("Using Ultraflash protocol"));
-                let file = std::fs::File::open(path)?;
-                let file_len = file.metadata()?.len();
                 let file_size =
                     u32::try_from(file_len).map_err(|_| FlashError::TooLarge(file_len))?;
                 let download_result = ultraflash_raw(self, file, file_size, progress).await;
@@ -645,23 +647,17 @@ impl NusbFastBoot {
                 return Ok(());
             }
             Err(NusbFastBootError::FastbootFailed(_)) => {
-                progress(FlashEvent::Message(
-                    "Ultraflash is not supported; using standard fastboot flash",
-                ));
+                // Unsupported by this device; silently use the standard path.
             }
             Err(error) => return Err(error.into()),
         }
-        let max_download = self.get_var("max-download-size").await?;
-        let max_download = parse_u32(&max_download).map_err(|e| {
-            NusbFastBootError::FastbootFailed(format!(
-                "Failed to parse max download size: {max_download}: {e}"
-            ))
-        })?;
-        progress(FlashEvent::Message(&format!(
-            "Max download size: {max_download} bytes"
-        )));
-
-        let mut file = std::fs::File::open(path)?;
+        let max_download = self
+            .get_var("max-download-size")
+            .await
+            .ok()
+            .and_then(|reported| parse_u32(&reported).ok())
+            .filter(|&size| usable_download_size(size))
+            .unwrap_or(DEFAULT_MAX_DOWNLOAD);
         let mut header_bytes = FileHeaderBytes::default();
         file.read_exact(&mut header_bytes)?;
 

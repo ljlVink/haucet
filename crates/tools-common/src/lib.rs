@@ -1,6 +1,7 @@
 pub mod bytes;
 pub mod compress;
 pub mod entropy;
+pub mod flash;
 pub mod formats;
 pub mod fs_util;
 pub mod nvme;

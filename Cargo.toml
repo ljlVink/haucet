@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/tools-common",
+    "crates/flash-script",
     "crates/tools-cli",
     "crates/tools-gui",
     "crates/hm-fastboot",

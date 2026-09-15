@@ -1,4 +1,5 @@
 pub(crate) mod fastboot;
+pub(crate) mod flash;
 
 use self::fastboot::{FastbootCommand, MemoryDevice, MemoryRegion};
 use anyhow::{Context, Result, ensure};
@@ -9,7 +10,6 @@ use hisi_vcom::transport::{self, SerialVcomDevice};
 use hisi_vcom::vcom;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 
 pub const WORKER_ENV: &str = "HAUCET_GUI_WORKER";
@@ -106,6 +106,12 @@ pub enum JobOp {
         output: String,
     },
     FastbootStorageAnalyse {},
+    FlashScriptValidate {
+        path: String,
+    },
+    FlashScriptRun {
+        path: String,
+    },
     VcomStatus {},
     VcomFlash {
         port: String,
@@ -132,12 +138,12 @@ pub fn is_worker_mode() -> bool {
 
 pub fn run_worker() -> i32 {
     let mut input = String::new();
-    let read = std::io::stdin().read_to_string(&mut input);
+    let read = std::io::stdin().read_line(&mut input);
     let result = match read {
-        Ok(_) => serde_json::from_str::<JobSpec>(&input)
+        Ok(0) | Err(_) => Err(anyhow::anyhow!(tr!("worker-read-spec-error"))),
+        Ok(_) => serde_json::from_str::<JobSpec>(input.trim())
             .context(tr!("worker-invalid-spec"))
             .and_then(|spec| execute(&spec.op)),
-        Err(e) => Err(e).context(tr!("worker-read-spec-error")),
     };
     let result = match result {
         Ok(result) => result,
@@ -415,6 +421,8 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
             output,
         } => fastboot::upload_memory(device, region, Path::new(output)),
         JobOp::FastbootStorageAnalyse {} => fastboot::storage_analyse(),
+        JobOp::FlashScriptValidate { path } => flash::validate(path),
+        JobOp::FlashScriptRun { path } => flash::run(path),
         JobOp::VcomStatus {} => vcom_status(),
         JobOp::VcomFlash {
             port,

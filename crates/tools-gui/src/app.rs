@@ -1,5 +1,5 @@
 use crate::i18n::{self, Language};
-use crate::job::{self, JobEvent, JobResult, RunningJob};
+use crate::job::{self, JobEvent, JobPrompt, JobResult, RunningJob};
 use crate::pages::images::ImageKind;
 use crate::pages::{self, Page};
 use crate::settings::Settings;
@@ -16,6 +16,7 @@ pub(crate) struct HaucetApp {
     pub online: pages::online::OnlinePage,
     pub images: pages::images::ImagesPage,
     pub fastboot: pages::fastboot::FastbootPage,
+    pub flash: pages::flash::FlashPage,
     pub vcom: pages::vcom::VcomPage,
     pub cpio: pages::cpio::CpioPage,
     pub nvme: pages::nvme::NvmePage,
@@ -23,6 +24,8 @@ pub(crate) struct HaucetApp {
 
     pub job: Option<RunningJob>,
     job_owner: ResultOwner,
+    pub prompt: Option<JobPrompt>,
+    pub job_progress: Option<crate::job::JobProgress>,
     pub logs: Vec<String>,
     pub settings: Settings,
     font_warning_pending: bool,
@@ -105,14 +108,17 @@ impl HaucetApp {
             online: pages::online::OnlinePage::default(),
             images: pages::images::ImagesPage::default(),
             fastboot: pages::fastboot::FastbootPage::default(),
+            flash: pages::flash::FlashPage::default(),
             vcom: pages::vcom::VcomPage::default(),
             cpio: pages::cpio::CpioPage::default(),
             nvme: pages::nvme::NvmePage::default(),
             oeminfo: pages::oeminfo::OemInfoPage::default(),
             job: None,
             job_owner: ResultOwner::Page(Page::Home),
-            logs: Vec::new(),
             settings,
+            prompt: None,
+            job_progress: None,
+            logs: Vec::new(),
             font_warning_pending: !font_loaded,
             logo,
             vibrancy_enabled,
@@ -208,6 +214,7 @@ impl HaucetApp {
         poll_page!(images.ramdisk);
         poll_page!(images.partition);
         poll_page!(fastboot);
+        poll_page!(flash);
         poll_page!(vcom);
         poll_page!(nvme);
         let mut oeminfo = std::mem::take(&mut self.oeminfo);
@@ -262,6 +269,19 @@ impl HaucetApp {
         for event in events {
             match event {
                 JobEvent::Log(line) => self.push_log(line),
+                JobEvent::Progress(progress) => {
+                    self.push_log(tr!(
+                        "flash-progress-log",
+                        "step" => progress.step + 1,
+                        "total" => progress.total,
+                        "label" => progress.label.clone(),
+                    ));
+                    self.job_progress = Some(progress);
+                }
+                JobEvent::Prompt(prompt) => {
+                    self.push_log(tr!("job-waiting-input", "message" => prompt.message.clone()));
+                    self.prompt = Some(prompt);
+                }
                 JobEvent::Done(result) => {
                     let owner = self.job_owner;
                     let mark = if result.cancelled {
@@ -279,7 +299,18 @@ impl HaucetApp {
         }
         if finished {
             self.job = None;
+            self.prompt = None;
+            self.job_progress = None;
             self.settings.save();
+        }
+    }
+
+    pub fn answer_prompt(&mut self, choice: Option<String>) {
+        if let Some(prompt) = self.prompt.take() {
+            self.push_log(tr!("job-input-answered"));
+            if let Some(job) = &self.job {
+                job.answer_prompt(prompt.id, choice.as_deref());
+            }
         }
     }
 
@@ -298,6 +329,8 @@ impl HaucetApp {
                 self.job_owner = owner;
                 self.push_log(tr!("job-start", "task" => label));
                 self.job = Some(running);
+                self.prompt = None;
+                self.job_progress = None;
                 self.results.remove(owner);
                 true
             }
@@ -424,7 +457,7 @@ impl HaucetApp {
         }
 
         nav_group_label(ui, &tr!("nav-devices-flashing"));
-        for page in [Page::Fastboot, Page::Vcom] {
+        for page in [Page::Flash, Page::Fastboot, Page::Vcom] {
             if nav_button(ui, self.current, page) {
                 self.nav(page);
             }
@@ -742,6 +775,11 @@ impl HaucetApp {
                     page.ui(ui, self);
                     self.fastboot = page;
                 }
+                Page::Flash => {
+                    let mut page = std::mem::take(&mut self.flash);
+                    page.ui(ui, self);
+                    self.flash = page;
+                }
                 Page::Vcom => {
                     let mut page = std::mem::take(&mut self.vcom);
                     page.ui(ui, self);
@@ -801,7 +839,6 @@ fn apply_content_text_style(ui: &mut egui::Ui) {
     text_styles.insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.5));
     text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(13.0));
 }
-
 fn job_label(op: &JobOp) -> String {
     use crate::worker::JobOp::*;
     match op {
@@ -830,6 +867,8 @@ fn job_label(op: &JobOp) -> String {
         FastbootStorageAnalyse { .. } => tr!("job-fastboot-storage-analyse"),
         VcomStatus { .. } => tr!("job-vcom-status"),
         VcomFlash { .. } => tr!("job-vcom-flash"),
+        FlashScriptValidate { .. } => tr!("job-flash-script-validate"),
+        FlashScriptRun { .. } => tr!("job-flash-script-run"),
     }
 }
 
@@ -847,10 +886,12 @@ fn result_owner(op: &JobOp, current: Page) -> ResultOwner {
         | JobOp::RamdiskRepack { .. }
         | JobOp::RamdiskPatch { .. }
         | JobOp::RamdiskProbe { .. } => ResultOwner::Image(ImageKind::Ramdisk),
-        JobOp::PartitionInfo { .. } => ResultOwner::Image(ImageKind::Partition),
         JobOp::FastbootMemoryList { .. }
         | JobOp::FastbootUploadMemory { .. }
         | JobOp::FastbootCommand { .. } => ResultOwner::Page(Page::Fastboot),
+        JobOp::FlashScriptValidate { .. } | JobOp::FlashScriptRun { .. } => {
+            ResultOwner::Page(Page::Flash)
+        }
         _ => ResultOwner::Page(current),
     }
 }

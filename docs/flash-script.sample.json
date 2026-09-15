@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Sample VCOM + fastboot session (edit paths before use)",
+  "steps": [
+    { "type": "wait_vcom", "timeout_secs": 60 },
+    { "type": "vcom_upload", "port": "auto", "address": "0x80000000", "file": "loaders/usbldr.bin" },
+    { "type": "wait_fastboot", "timeout_secs": 30 },
+    { "type": "fastboot_assert", "variable": "product", "value": "YOUR_PRODUCT" },
+    { "type": "alert", "message": "About to flash partitions. Confirm to continue." },
+    { "type": "fastboot_flash", "partition": "boot", "file": "images/boot.img" },
+    { "type": "fastboot_erase", "partition": "userdata" },
+    { "type": "fastboot_reboot", "mode": "system" }
+  ]
+}

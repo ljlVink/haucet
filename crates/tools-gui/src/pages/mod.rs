@@ -3,6 +3,7 @@ pub mod entropy;
 pub mod erofs;
 pub mod ext4;
 pub mod fastboot;
+pub mod flash;
 pub mod home;
 pub mod images;
 pub mod nvme;
@@ -22,6 +23,7 @@ pub enum Page {
     Online,
     Images,
     Fastboot,
+    Flash,
     Vcom,
     Cpio,
     Nvme,
@@ -36,9 +38,10 @@ impl Page {
             Self::Online => tr!("page-online-title"),
             Self::Images => tr!("page-images-title"),
             Self::Fastboot => tr!("page-fastboot-title"),
+            Self::Flash => tr!("page-flash-title"),
             Self::Vcom => tr!("page-vcom-title"),
             Self::Cpio => tr!("page-cpio-title"),
-            Self::Nvme => tr!("page-nvme-title"),
+            Self::Nvme => tr!("page-nvme-editor-title"),
             Self::OemInfo => tr!("page-oeminfo-title"),
         }
     }
@@ -50,6 +53,7 @@ impl Page {
             Self::Online => Some((tr!("page-online-title"), "VERSION.mbn".to_owned())),
             Self::Images => Some((tr!("page-images-title"), tr!("page-images-description"))),
             Self::Fastboot => Some((tr!("page-fastboot-title"), tr!("page-fastboot-description"))),
+            Self::Flash => Some((tr!("page-flash-title"), tr!("page-flash-description"))),
             Self::Vcom => Some((tr!("page-vcom-title"), tr!("page-vcom-description"))),
             Self::Cpio => Some((tr!("page-cpio-title"), tr!("page-cpio-description"))),
             Self::Nvme => Some((tr!("page-nvme-editor-title"), tr!("page-nvme-description"))),

@@ -18,6 +18,7 @@ egui-notify = "0.22"
 egui_extras = { version = "0.34", default-features = false, features = ["image"] }
 fluent-bundle = "0.16"
 flate2.workspace = true
+flash-script = { path = "../flash-script" }
 hisi-vcom = { path = "../hisi-vcom" }
 hm-fastboot = { path = "../hm-fastboot" }
 image = { version = "0.25", default-features = false, features = ["bmp", "png"] }

@@ -1,22 +1,17 @@
 [package]
-name = "cli"
+name = "flash-script"
 version.workspace = true
 edition.workspace = true
-description = "Command-line interface for haucet"
+rust-version.workspace = true
 license.workspace = true
-
-[[bin]]
-name = "haucet"
-path = "src/main.rs"
+description = "Flash script executor shared by the haucet CLI and GUI worker"
+repository = "https://github.com/ljlVink/haucet"
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
 common = { path = "../tools-common" }
 hm-fastboot = { path = "../hm-fastboot" }
 hisi-vcom = { path = "../hisi-vcom" }
-flash-script = { path = "../flash-script" }
+serde.workspace = true
+serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
-
-[build-dependencies]
-winresource = { version = "0.1", default-features = false }

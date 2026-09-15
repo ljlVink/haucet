@@ -1,8 +1,10 @@
 use crate::worker::{self, JobOp, JobSpec, WorkerResult};
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::io::{self, BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -11,12 +13,34 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobProgress {
+    pub step: usize,
+    pub total: usize,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobPrompt {
+    pub id: u64,
+    pub kind: String,
+    pub message: String,
+    pub options: Vec<PromptChoice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PromptChoice {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum JobEvent {
     Log(String),
+    Progress(JobProgress),
+    Prompt(JobPrompt),
     Done(JobResult),
 }
-
 #[derive(Debug, Clone)]
 pub struct JobResult {
     pub ok: bool,
@@ -30,6 +54,7 @@ pub struct RunningJob {
     rx: Receiver<JobEvent>,
     cancelled: Arc<AtomicBool>,
     started: Instant,
+    stdin: Mutex<Option<ChildStdin>>,
     pub op: JobOp,
 }
 
@@ -45,6 +70,20 @@ impl RunningJob {
 
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    pub fn answer_prompt(&self, id: u64, choice: Option<&str>) {
+        let answer = serde_json::json!({
+            "t": "answer",
+            "id": id,
+            "choice": choice,
+        });
+        if let Ok(mut guard) = self.stdin.lock()
+            && let Some(stdin) = guard.as_mut()
+        {
+            let _ = writeln!(stdin, "{answer}");
+            let _ = stdin.flush();
+        }
     }
 }
 
@@ -80,8 +119,9 @@ pub fn start(op: JobOp) -> Result<RunningJob> {
             .context(tr!("worker-stdin-error"))?;
         stdin
             .write_all(json.as_bytes())
+            .and_then(|()| stdin.write_all(b"\n"))
+            .and_then(|()| stdin.flush())
             .context(tr!("worker-send-error"))?;
-        drop(stdin);
 
         let stdout = worker
             .child
@@ -93,9 +133,9 @@ pub fn start(op: JobOp) -> Result<RunningJob> {
             .stderr
             .take()
             .context(tr!("worker-stderr-error"))?;
-        Ok((stdout, stderr))
+        Ok((stdin, stdout, stderr))
     })();
-    let (stdout, stderr) = match pipes {
+    let (stdin, stdout, stderr) = match pipes {
         Ok(pipes) => pipes,
         Err(error) => {
             worker.terminate();
@@ -118,6 +158,23 @@ pub fn start(op: JobOp) -> Result<RunningJob> {
                 Some("log") => {
                     if let Some(text) = value.get("s").and_then(|s| s.as_str()) {
                         let _ = tx.send(JobEvent::Log(text.to_owned()));
+                    }
+                }
+                Some("progress") => {
+                    let progress = JobProgress {
+                        step: value.get("step").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        total: value.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        label: value
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    };
+                    let _ = tx.send(JobEvent::Progress(progress));
+                }
+                Some("prompt") => {
+                    if let Some(prompt) = parse_prompt(&value) {
+                        let _ = tx.send(JobEvent::Prompt(prompt));
                     }
                 }
                 Some("result") => {
@@ -171,7 +228,29 @@ pub fn start(op: JobOp) -> Result<RunningJob> {
         rx,
         cancelled,
         started: Instant::now(),
+        stdin: Mutex::new(Some(stdin)),
         op,
+    })
+}
+
+fn parse_prompt(value: &serde_json::Value) -> Option<JobPrompt> {
+    let id = value.get("id")?.as_u64()?;
+    Some(JobPrompt {
+        id,
+        kind: value
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        message: value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        options: serde_json::from_value::<Vec<PromptChoice>>(
+            value.get("options").cloned().unwrap_or_default(),
+        )
+        .unwrap_or_default(),
     })
 }
 

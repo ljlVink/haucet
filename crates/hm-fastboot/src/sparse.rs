@@ -298,6 +298,10 @@ fn check_minimal_size(size: u32, block_size: u32) -> Result<(), SplitError> {
     Ok(())
 }
 
+pub fn usable_download_size(size: u32) -> bool {
+    check_minimal_size(size, DEFAULT_BLOCKSIZE).is_ok()
+}
+
 pub fn split_image(
     header: &FileHeader,
     chunks: &[ChunkHeader],

@@ -52,17 +52,19 @@ The initial release rebuilds partition images. It does not create a newly signed
 
 ## References
 
+Thanks to the authors and maintainers of the projects below for their work and support.
+
 - [boardswarm/fastboot-rs](https://github.com/boardswarm/fastboot-rs) - upstream of the Rust fastboot implementation used by `hm-fastboot`.
 - [sekaiacg/erofs-tools](https://github.com/sekaiacg/erofs-tools) and [erofs/erofs-utils](https://github.com/erofs/erofs-utils) - EROFS extraction/repacking tools and filesystem implementation.
 - [ext4-view](https://github.com/nicholasbishop/ext4-view-rs) - pure Rust read-only ext2/ext4 filesystem parser.
 - [ext4-rs](https://github.com/FauxFaux/ext4-rs) - pure Rust ext4 inode and extended-attribute parser.
 - [kitsuned/Potato.ImageFlasher](https://github.com/kitsuned/Potato.ImageFlasher) - image-flashing workflow reference reimplemented in Rust.
-- [ljlVink/ramdisk-tools](https://github.com/ljlVink/ramdisk-tools) and [topjohnwu/Magisk](https://github.com/topjohnwu/Magisk) - ramdisk formats and the `init_early` patch layout.
+- [topjohnwu/Magisk](https://github.com/topjohnwu/Magisk) - ramdisk formats and the `init_early` patch layout.
 - [OpenHarmony update_packaging_tools](https://gitcode.com/openharmony/update_packaging_tools) - HarmonyOS/OpenHarmony update package format behavior.
 - [OpenHarmony startup_hvb](https://gitcode.com/openharmony/startup_hvb) - HVB header, certificate, and footer format behavior.
 - [R0rt1z2/hisi-nve](https://github.com/R0rt1z2/hisi-nve) - Huawei NVE layout and update behavior.
 - [ud3v0id/huawei-oeminfo-tool](https://github.com/ud3v0id/huawei-oeminfo-tool) - OEMINFO block layout and payload classification reference.
-- [Huawei HarmonyOS Sans](https://developer.huawei.com/consumer/cn/design/resource/) ([archived source package](https://github.com/ajacocks/harmonyos-sans-font)) - GUI font; its license is separate from the program license.
+- [Huawei HarmonyOS Sans](https://developer.huawei.com/consumer/cn/design/resource/)
 
 ## License
 

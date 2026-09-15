@@ -10,6 +10,7 @@ use common::{
 use std::path::{Path, PathBuf};
 
 mod fastboot;
+mod script;
 mod vcom;
 
 #[derive(Debug, Parser)]
@@ -74,6 +75,12 @@ enum Command {
     Vcom {
         #[command(subcommand)]
         command: VcomCommand,
+    },
+    /// Run a declarative flash script
+    #[command(arg_required_else_help = true)]
+    FlashScript {
+        #[command(subcommand)]
+        command: FlashScriptCommand,
     },
     /// Unpack, repack, or patch a ramdisk image
     #[command(arg_required_else_help = true)]
@@ -165,6 +172,12 @@ enum VcomCommand {
         /// Loader binary to upload
         file: PathBuf,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum FlashScriptCommand {
+    /// Run a flash script
+    Run { script: PathBuf },
 }
 
 #[derive(Debug, Args)]
@@ -604,6 +617,12 @@ fn run_vcom_command(command: VcomCommand) -> Result<()> {
     }
 }
 
+fn run_flash_script_command(command: FlashScriptCommand) -> Result<()> {
+    match command {
+        FlashScriptCommand::Run { script } => script::run(&script),
+    }
+}
+
 fn run_ramdisk_command(command: RamdiskCommand) -> Result<()> {
     match command {
         RamdiskCommand::Unpack { image, out, force } => {
@@ -637,6 +656,7 @@ fn main() {
         Command::Fastboot { command } => run_fastboot_command(command),
         Command::Vcom { command } => run_vcom_command(command),
         Command::Ramdisk { command } => run_ramdisk_command(command),
+        Command::FlashScript { command } => run_flash_script_command(command),
     };
 
     if let Err(error) = result {
