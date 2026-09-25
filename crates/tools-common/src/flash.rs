@@ -24,6 +24,8 @@ pub enum FlashStep {
         port: String,
         address: String,
         file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exploit_brom: Option<ExploitBrom>,
     },
     WaitFastboot {
         timeout_secs: u64,
@@ -93,6 +95,7 @@ impl FlashStep {
                 port,
                 address,
                 file,
+                exploit_brom,
             } => {
                 ensure!(!port.trim().is_empty(), "{} port must not be empty", at());
                 ensure!(
@@ -101,6 +104,9 @@ impl FlashStep {
                     at()
                 );
                 ensure!(!file.trim().is_empty(), "{} file must not be empty", at());
+                if let Some(exploit) = exploit_brom {
+                    validate_exploit_brom(exploit, at)?;
+                }
             }
             Self::FastbootAssert { variable, .. } => {
                 ensure!(
@@ -151,8 +157,28 @@ impl FlashStep {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExploitBrom {
+    pub xloader_entry: String,
+    pub return_address: String,
+}
+
 fn is_fastboot_token(value: &str) -> bool {
     !value.trim().is_empty() && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
+fn validate_exploit_brom(exploit: &ExploitBrom, at: impl Fn() -> String) -> Result<()> {
+    ensure!(
+        parse_u32_address(&exploit.xloader_entry).is_some(),
+        "{} exploit_brom.xloader_entry must be a hexadecimal 32-bit value",
+        at()
+    );
+    ensure!(
+        parse_u32_address(&exploit.return_address).is_some(),
+        "{} exploit_brom.return_address must be a hexadecimal 32-bit value",
+        at()
+    );
+    Ok(())
 }
 
 pub fn parse_u32_address(value: &str) -> Option<u32> {
