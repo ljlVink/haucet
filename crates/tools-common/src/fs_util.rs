@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const IO_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
@@ -167,4 +168,71 @@ pub fn set_unix_mode(path: &Path, mode: Option<u32>) -> Result<()> {
 #[cfg(not(unix))]
 pub fn set_unix_mode(_path: &Path, _mode: Option<u32>) -> Result<()> {
     Ok(())
+}
+
+pub fn create_backup(
+    path: &Path,
+    contents: &[u8],
+    source_permissions: fs::Permissions,
+    label: &str,
+) -> Result<PathBuf> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{label} path has no file name"))?
+        .to_string_lossy();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX epoch")?;
+    let mut suffix = 0_u32;
+    loop {
+        let suffix_text = if suffix == 0 {
+            String::new()
+        } else {
+            format!("-{suffix}")
+        };
+        let backup = parent.join(format!(
+            "{name}.bak_{}_{}{suffix_text}",
+            now.as_secs(),
+            now.subsec_nanos()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut backup_file = match options.open(&backup) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                suffix = suffix
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("too many {label} backup name collisions"))?;
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "creating {label} backup {} from {}",
+                        backup.display(),
+                        path.display()
+                    )
+                });
+            }
+        };
+        let write_result = (|| -> Result<()> {
+            backup_file.write_all(contents)?;
+            fs::set_permissions(&backup, source_permissions.clone())?;
+            backup_file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            drop(backup_file);
+            let _ = fs::remove_file(&backup);
+            return Err(error)
+                .with_context(|| format!("writing {label} backup {}", backup.display()));
+        }
+        return Ok(backup);
+    }
 }

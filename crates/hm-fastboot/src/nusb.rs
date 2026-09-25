@@ -635,21 +635,23 @@ impl NusbFastBoot {
     ) -> Result<(), FlashError> {
         let mut file = std::fs::File::open(path)?;
         let file_len = file.metadata()?.len();
-        match self.ultraflash(target).await {
-            Ok(()) => {
-                progress(FlashEvent::Message("Using Ultraflash protocol"));
-                let file_size =
-                    u32::try_from(file_len).map_err(|_| FlashError::TooLarge(file_len))?;
-                let download_result = ultraflash_raw(self, file, file_size, progress).await;
-                let stop_result = self.ultraflash_stop().await;
-                download_result?;
-                stop_result?;
-                return Ok(());
-            }
-            Err(NusbFastBootError::FastbootFailed(_)) => {
-                // Unsupported by this device; silently use the standard path.
-            }
-            Err(error) => return Err(error.into()),
+        // The bootloader's ultraflash session does not handle OEMINFO, so
+        // never negotiate it for that partition and always take the standard
+        // download + flash path.
+        let use_ultraflash = !target.eq_ignore_ascii_case("oeminfo")
+            && match self.ultraflash(target).await {
+                Ok(()) => true,
+                Err(NusbFastBootError::FastbootFailed(_)) => false,
+                Err(error) => return Err(error.into()),
+            };
+        if use_ultraflash {
+            progress(FlashEvent::Message("Using Ultraflash protocol"));
+            let file_size = u32::try_from(file_len).map_err(|_| FlashError::TooLarge(file_len))?;
+            let download_result = ultraflash_raw(self, file, file_size, progress).await;
+            let stop_result = self.ultraflash_stop().await;
+            download_result?;
+            stop_result?;
+            return Ok(());
         }
         let max_download = self
             .get_var("max-download-size")

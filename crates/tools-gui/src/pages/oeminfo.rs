@@ -2,12 +2,14 @@ use crate::app::HaucetApp;
 use crate::pages::Page;
 use crate::util::{human_size, open_in_file_manager, section};
 use anyhow::{Context, Result, ensure};
-use common::oeminfo::{OemInfoBlockSummary, OemInfoImageSummary, OemInfoPayloadKind};
+use common::oeminfo::{
+    OEMINFO_BOOT_LOGO_ID, OemInfoBlockSummary, OemInfoImageSummary, OemInfoPayloadKind,
+};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use flate2::read::MultiGzDecoder;
 use std::io::{Cursor, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -64,6 +66,7 @@ impl Default for OemInfoPage {
 enum OemInfoOperation {
     Inspect { input: String, generation: u64 },
     Export { output: String },
+    ReplaceLogo,
 }
 
 #[derive(Debug)]
@@ -278,6 +281,10 @@ impl OemInfoPage {
             if is_image_block(&block) {
                 ui.add_space(12.0);
                 self.render_image_preview(ui, app, &block);
+                if block.id == OEMINFO_BOOT_LOGO_ID {
+                    ui.add_space(12.0);
+                    self.render_boot_logo_replace(ui, app);
+                }
             }
         }
     }
@@ -317,6 +324,13 @@ impl OemInfoPage {
                     ok: result.ok,
                     output,
                 });
+            }
+            OemInfoOperation::ReplaceLogo => {
+                app.notify_result(&result);
+                if result.ok {
+                    self.export_result = None;
+                    self.request_inspection(!self.input.trim().is_empty());
+                }
             }
         }
     }
@@ -481,6 +495,74 @@ impl OemInfoPage {
         }
     }
 
+    fn render_boot_logo_replace(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
+        section(ui, &tr!("boot-logo-section"));
+        let expected_size = self.current_preview_key().and_then(|key| {
+            self.preview_texture
+                .as_ref()
+                .filter(|preview| preview.key == key)
+                .map(|preview| preview.original_size)
+        });
+        match expected_size {
+            Some([width, height]) => ui.label(
+                egui::RichText::new(
+                    tr!("boot-logo-requirement", "width" => width, "height" => height),
+                )
+                .small()
+                .weak(),
+            ),
+            None => ui.label(
+                egui::RichText::new(tr!("boot-logo-requirement-unknown"))
+                    .small()
+                    .weak(),
+            ),
+        };
+
+        let can_replace = !app.job_running() && self.operation.is_none();
+        if ui
+            .add_enabled(
+                can_replace,
+                egui::Button::new(tr!("choose-replacement-bmp")),
+            )
+            .clicked()
+        {
+            let picked = app.pick_file(
+                &tr!("pick-replacement-bmp"),
+                &[(&tr!("filter-bmp-file"), &["bmp"])],
+            );
+            if let Some(path) = picked {
+                self.start_boot_logo_replace(app, path, expected_size);
+            }
+        }
+    }
+
+    fn start_boot_logo_replace(
+        &mut self,
+        app: &mut HaucetApp,
+        path: PathBuf,
+        expected_size: Option<[u32; 2]>,
+    ) {
+        if let Some([width, height]) = expected_size
+            && let Some((replacement_width, replacement_height)) = read_bmp_dimensions(&path)
+            && (replacement_width, replacement_height) != (width, height)
+        {
+            app.notify(
+                egui_notify::ToastLevel::Error,
+                tr!(
+                    "bmp-dimension-mismatch",
+                    "expected" => format!("{width}x{height}"),
+                    "actual" => format!("{replacement_width}x{replacement_height}")
+                ),
+            );
+            return;
+        }
+        self.operation = Some(OemInfoOperation::ReplaceLogo);
+        app.start_job(crate::worker::JobOp::OemInfoReplaceBootLogo {
+            image: self.input.trim().to_owned(),
+            replacement: path.display().to_string(),
+        });
+    }
+
     fn preview_key(&self, block: &OemInfoBlockSummary) -> PreviewKey {
         PreviewKey {
             generation: self.preview_generation,
@@ -640,6 +722,16 @@ fn is_image_block(block: &OemInfoBlockSummary) -> bool {
     )
 }
 
+fn read_bmp_dimensions(path: &Path) -> Option<(u32, u32)> {
+    use std::io::Read as _;
+
+    let mut header = [0_u8; 34];
+    let mut file = std::fs::File::open(path).ok()?;
+    file.read_exact(&mut header).ok()?;
+    let info = common::oeminfo::bmp_info(&header)?;
+    Some((info.width, info.height))
+}
+
 fn preview_display_size(texture_size: [usize; 2], available_width: f32) -> egui::Vec2 {
     let source = egui::vec2(texture_size[0] as f32, texture_size[1] as f32);
     if source.x <= 0.0 || source.y <= 0.0 {
@@ -717,13 +809,24 @@ fn decode_image_data(
     ensure_preview_active(cancelled)?;
     ensure!(bmp.starts_with(b"BM"), "{}", tr!("image-not-bmp"));
 
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_PREVIEW_IMAGE_SIDE);
-    limits.max_image_height = Some(MAX_PREVIEW_IMAGE_SIDE);
-    limits.max_alloc = Some(MAX_PREVIEW_DECODE_ALLOCATION);
-    let mut reader = image::ImageReader::with_format(Cursor::new(bmp), image::ImageFormat::Bmp);
-    reader.limits(limits);
-    let decoded = reader.decode().context(tr!("decode-oeminfo-bmp"))?;
+    let decoded = if let Some(info) = common::oeminfo::bmp_info(&bmp)
+        && info.bits_per_pixel == 16
+        && info.compression == 0
+    {
+        let (rgba, width, height) =
+            common::oeminfo::decode_rgb565_bmp(&bmp).context(tr!("decode-oeminfo-bmp"))?;
+        let buffer = image::RgbaImage::from_raw(width, height, rgba)
+            .context(tr!("bmp-decoded-size-invalid"))?;
+        image::DynamicImage::ImageRgba8(buffer)
+    } else {
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_PREVIEW_IMAGE_SIDE);
+        limits.max_image_height = Some(MAX_PREVIEW_IMAGE_SIDE);
+        limits.max_alloc = Some(MAX_PREVIEW_DECODE_ALLOCATION);
+        let mut reader = image::ImageReader::with_format(Cursor::new(bmp), image::ImageFormat::Bmp);
+        reader.limits(limits);
+        reader.decode().context(tr!("decode-oeminfo-bmp"))?
+    };
     ensure_preview_active(cancelled)?;
     let original_size = [decoded.width(), decoded.height()];
     ensure!(

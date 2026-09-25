@@ -728,6 +728,7 @@ dependencies = [
  "flate2",
  "fs2",
  "hex",
+ "image",
  "libc",
  "lz4",
  "lzma-rust2",

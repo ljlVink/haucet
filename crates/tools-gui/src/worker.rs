@@ -79,6 +79,10 @@ pub enum JobOp {
         block: oeminfo::OemInfoBlockSummary,
         output: String,
     },
+    OemInfoReplaceBootLogo {
+        image: String,
+        replacement: String,
+    },
     NvmeEdit {
         image: String,
         key: String,
@@ -379,6 +383,19 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
                 summary: tr!("worker-oeminfo-exported", "output" => output.clone()),
                 payload: None,
             })
+        }
+        JobOp::OemInfoReplaceBootLogo { image, replacement } => {
+            let result = oeminfo::replace_boot_logo(Path::new(image), Path::new(replacement))?;
+            summary_payload(
+                tr!(
+                    "worker-oeminfo-logo-replaced",
+                    "offset" => format!("0x{:X}", result.target_offset),
+                    "age" => result.age,
+                    "bytes" => result.payload_bytes,
+                    "backup" => result.backup_path.clone()
+                ),
+                result,
+            )
         }
         JobOp::NvmeEdit {
             image,

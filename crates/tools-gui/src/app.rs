@@ -846,6 +846,7 @@ fn job_label(op: &JobOp) -> String {
         NvmeEdit { .. } => tr!("job-nvme-edit"),
         OemInfoInspect { .. } => tr!("job-oeminfo-inspect"),
         OemInfoExportImage { .. } => tr!("job-oeminfo-export"),
+        OemInfoReplaceBootLogo { .. } => tr!("job-oeminfo-replace-logo"),
         PackageInspect { .. } => tr!("job-package-inspect"),
         OnlineFetch { .. } => tr!("online-fetch"),
         PackageUnpack { .. } => tr!("job-package-unpack"),

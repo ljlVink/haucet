@@ -1,9 +1,12 @@
 use anyhow::{Context, Result, ensure};
+use flate2::Compression;
+use flate2::read::MultiGzDecoder;
+use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub const OEMINFO_MAGIC: &[u8; 8] = b"OEM_INFO";
@@ -14,6 +17,10 @@ pub const OEMINFO_STANDARD_ALIGNMENT: usize = 0x1000;
 pub const OEMINFO_REUSED_ALIGNMENT: usize = 0x80;
 pub const OEMINFO_MAX_EMBEDDED_IMAGE_SIZE: u64 = 256 * 1024 * 1024;
 pub const OEMINFO_MAX_AGE: u32 = 0x3B9AC9FF;
+pub const OEMINFO_BOOT_LOGO_ID: u32 = 4501;
+const IMAGE_END_ALIGNMENT: u32 = 16;
+const MAX_LOGO_SIDE: u32 = 8192;
+const MAX_LOGO_DECODE_ALLOCATION: u64 = 384 * 1024 * 1024;
 
 const PROBE_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 const PROBE_SCAN_LIMIT: u64 = 64 * 1024 * 1024;
@@ -537,6 +544,489 @@ pub fn export_embedded_image(
         Ok(())
     })
     .with_context(|| format!("exporting embedded OEMINFO image to {}", output.display()))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OemInfoBootLogoReplacement {
+    pub backup_path: String,
+    pub target_offset: u64,
+    pub age: u32,
+    pub payload_bytes: u64,
+    pub payload_kind: OemInfoPayloadKind,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BmpInfo {
+    pub width: u32,
+    pub height: u32,
+    pub top_down: bool,
+    pub bits_per_pixel: u16,
+    pub compression: u32,
+    pub data_offset: usize,
+}
+
+pub fn bmp_info(data: &[u8]) -> Option<BmpInfo> {
+    if data.len() < 34 || !data.starts_with(b"BM") || read_u32(data, 14) < 40 {
+        return None;
+    }
+    let width = read_u32(data, 18);
+    let signed_height = read_u32(data, 22) as i32;
+    if width == 0 || width > MAX_LOGO_SIDE || signed_height == 0 {
+        return None;
+    }
+    let height = signed_height.unsigned_abs();
+    if height > MAX_LOGO_SIDE {
+        return None;
+    }
+    Some(BmpInfo {
+        width,
+        height,
+        top_down: signed_height < 0,
+        bits_per_pixel: u16::from_le_bytes([data[28], data[29]]),
+        compression: read_u32(data, 30),
+        data_offset: read_u32(data, 10) as usize,
+    })
+}
+
+pub fn decode_rgb565_bmp(data: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
+    let info = bmp_info(data).context("parsing BMP header of embedded 16-bpp image")?;
+    ensure!(
+        info.bits_per_pixel == 16 && info.compression == 0,
+        "embedded image is not an uncompressed 16-bpp BMP"
+    );
+    let width = info.width as usize;
+    let height = info.height as usize;
+    let stride = width
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_next_multiple_of(4))
+        .context("16-bpp BMP row size overflows")?;
+    let pixel_bytes = stride
+        .checked_mul(height)
+        .context("16-bpp BMP pixel data size overflows")?;
+    let data_end = info
+        .data_offset
+        .checked_add(pixel_bytes)
+        .context("16-bpp BMP data range overflows")?;
+    ensure!(
+        data_end <= data.len(),
+        "16-bpp BMP pixel data is truncated: needs 0x{data_end:X} bytes, file has {}",
+        data.len()
+    );
+    let allocation = u64::try_from(width * height * 4).expect("bounded by MAX_LOGO_SIDE");
+    ensure!(
+        allocation <= MAX_LOGO_DECODE_ALLOCATION,
+        "16-bpp BMP decode would allocate {allocation} bytes"
+    );
+
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for row in 0..height {
+        let source_row = if info.top_down { row } else { height - 1 - row };
+        let row_start = info.data_offset + source_row * stride;
+        for column in 0..width {
+            let pixel = u16::from_le_bytes([
+                data[row_start + column * 2],
+                data[row_start + column * 2 + 1],
+            ]);
+            let red = (pixel >> 11) & 0x1f;
+            let green = (pixel >> 5) & 0x3f;
+            let blue = pixel & 0x1f;
+            rgba.extend_from_slice(&[
+                ((red << 3) | (red >> 2)) as u8,
+                ((green << 2) | (green >> 4)) as u8,
+                ((blue << 3) | (blue >> 2)) as u8,
+                0xff,
+            ]);
+        }
+    }
+    Ok((rgba, info.width, info.height))
+}
+
+fn encode_rgb565_bmp(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        rgba.len() as u64 == u64::from(width) * u64::from(height) * 4,
+        "pixel buffer does not match {width}x{height} RGBA"
+    );
+    ensure!(
+        width <= MAX_LOGO_SIDE && height <= MAX_LOGO_SIDE,
+        "replacement logo exceeds {MAX_LOGO_SIDE}x{MAX_LOGO_SIDE} pixels"
+    );
+    let stride = (width as usize * 2).next_multiple_of(4);
+    let pixel_bytes = stride
+        .checked_mul(height as usize)
+        .context("encoded BMP pixel data size overflows")?;
+    let file_size = 0x36 + pixel_bytes;
+    ensure!(
+        file_size <= u32::MAX as usize,
+        "encoded BMP exceeds the 4 GiB BMP size limit"
+    );
+
+    let mut bmp = Vec::with_capacity(file_size);
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&(file_size as u32).to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&0x36u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&width.to_le_bytes());
+    bmp.extend_from_slice(&(-(height as i32)).to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&16u16.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
+    bmp.extend_from_slice(&[0u8; 16]);
+
+    let mut row = vec![0_u8; stride];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let pixel_offset = (y * width as usize + x) * 4;
+            let pixel = (u16::from(rgba[pixel_offset]) >> 3) << 11
+                | (u16::from(rgba[pixel_offset + 1]) >> 2) << 5
+                | u16::from(rgba[pixel_offset + 2]) >> 3;
+            row[x * 2..x * 2 + 2].copy_from_slice(&pixel.to_le_bytes());
+        }
+        bmp.extend_from_slice(&row);
+    }
+    Ok(bmp)
+}
+
+fn transcode_replacement_bmp(data: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
+    ensure!(
+        bmp_info(data).is_some(),
+        "replacement file is not a supported BMP"
+    );
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_LOGO_SIDE);
+    limits.max_image_height = Some(MAX_LOGO_SIDE);
+    limits.max_alloc = Some(MAX_LOGO_DECODE_ALLOCATION);
+    let mut reader = image::ImageReader::with_format(Cursor::new(data), image::ImageFormat::Bmp);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .context("decoding replacement BMP image data")?;
+    let (width, height) = (decoded.width(), decoded.height());
+    let rgba = decoded.into_rgba8().into_raw();
+    let bmp = encode_rgb565_bmp(width, height, &rgba)?;
+    Ok((bmp, width, height))
+}
+
+fn decompress_logo_gzip(data: Vec<u8>, limit: u64) -> Result<Vec<u8>> {
+    let decoder = MultiGzDecoder::new(Cursor::new(data));
+    let mut limited = decoder.take(limit.saturating_add(1));
+    let mut decoded = Vec::new();
+    limited
+        .read_to_end(&mut decoded)
+        .context("decompressing embedded OEMINFO image")?;
+    ensure!(
+        decoded.len() as u64 <= limit,
+        "decompressed embedded OEMINFO image exceeds {limit} bytes"
+    );
+    Ok(decoded)
+}
+
+fn read_logo_dimensions(raw: &[u8], block: &ParsedBlock) -> Result<(u32, u32)> {
+    let payload = &raw[block.payload_range()];
+    let bmp = match block.payload.kind {
+        OemInfoPayloadKind::ImageGzip => decompress_logo_gzip(
+            payload[IMAGE_DATA_OFFSET..].to_vec(),
+            OEMINFO_MAX_EMBEDDED_IMAGE_SIZE,
+        )?,
+        OemInfoPayloadKind::ImageRaw => payload[IMAGE_DATA_OFFSET..].to_vec(),
+        kind => anyhow::bail!(
+            "OEMINFO block 4501 at 0x{:X} is not an image (found {kind})",
+            block.offset
+        ),
+    };
+    let info = bmp_info(&bmp).ok_or_else(|| {
+        anyhow::anyhow!(
+            "embedded boot logo at 0x{:X} is not a BITMAPINFOHEADER BMP",
+            block.offset
+        )
+    })?;
+    Ok((info.width, info.height))
+}
+
+pub fn replace_boot_logo(
+    path: &Path,
+    replacement_bmp: &Path,
+) -> Result<OemInfoBootLogoReplacement> {
+    let replacement_raw = fs::read(replacement_bmp)
+        .with_context(|| format!("reading replacement BMP {}", replacement_bmp.display()))?;
+    let (replacement_encoded, width, height) = transcode_replacement_bmp(&replacement_raw)?;
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening OEMINFO image for editing {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading metadata of {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_file(),
+        "OEMINFO logo replacement only supports regular files; dump the partition to an image file first"
+    );
+    fs2::FileExt::lock_exclusive(&file)
+        .with_context(|| format!("locking OEMINFO image for editing {}", path.display()))?;
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut original = Vec::new();
+    file.read_to_end(&mut original)
+        .with_context(|| format!("reading locked OEMINFO image {}", path.display()))?;
+    let image = OemInfoImage::from_bytes(original.clone())?;
+    let raw = image.as_bytes();
+    let region_size = image.region_size;
+
+    let logo_blocks = image
+        .blocks
+        .iter()
+        .filter(|block| block.id == OEMINFO_BOOT_LOGO_ID)
+        .collect::<Vec<_>>();
+    ensure!(
+        logo_blocks.len() <= 2,
+        "OEMINFO image contains {} blocks with id {OEMINFO_BOOT_LOGO_ID}; at most two (one per bank) are expected",
+        logo_blocks.len()
+    );
+    ensure!(
+        !logo_blocks.is_empty(),
+        "OEMINFO image contains no boot logo block {OEMINFO_BOOT_LOGO_ID}"
+    );
+    for block in &logo_blocks {
+        ensure!(
+            block.header_size == OEMINFO_STANDARD_HEADER_SIZE
+                && matches!(
+                    block.payload.kind,
+                    OemInfoPayloadKind::ImageRaw | OemInfoPayloadKind::ImageGzip
+                ),
+            "boot logo block 4501 at 0x{:X} has an unexpected layout ({}, {})",
+            block.offset,
+            block.layout,
+            block.payload.kind
+        );
+    }
+    let source = logo_blocks
+        .iter()
+        .find(|block| block.active)
+        .context("OEMINFO boot logo block has no active copy")?;
+    ensure!(
+        logo_blocks.iter().filter(|block| block.active).count() == 1,
+        "OEMINFO boot logo block has multiple active copies; the image layout is ambiguous"
+    );
+
+    let (logo_width, logo_height) = read_logo_dimensions(raw, source)?;
+    ensure!(
+        (logo_width, logo_height) == (width, height),
+        "replacement BMP is {width}x{height}, but the active boot logo is {logo_width}x{logo_height}; the pixel dimensions must match"
+    );
+
+    let source_payload = &raw[source.payload_range()];
+    let image_version = source_payload[12..24].to_vec();
+    let payload_data = match source.payload.kind {
+        OemInfoPayloadKind::ImageGzip => {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+            encoder
+                .write_all(&replacement_encoded)
+                .context("compressing replacement boot logo")?;
+            encoder
+                .finish()
+                .context("finishing replacement boot logo compression")?
+        }
+        _ => replacement_encoded,
+    };
+    let payload_len = IMAGE_DATA_OFFSET + payload_data.len();
+    ensure!(
+        payload_len <= u32::MAX as usize,
+        "replacement logo payload exceeds 4 GiB"
+    );
+    let end_offset = (payload_len as u32).next_multiple_of(IMAGE_END_ALIGNMENT);
+    let random_adjust = end_offset - payload_len as u32;
+    let sub_id = payload_len.div_ceil(OEMINFO_HEADER_SIZE * 16) as u32;
+    let new_age = image
+        .blocks
+        .iter()
+        .filter(|block| block.id == OEMINFO_BOOT_LOGO_ID)
+        .map(|block| block.age)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .filter(|age| *age <= OEMINFO_MAX_AGE)
+        .context("OEMINFO boot logo generation counter overflow")?;
+    let target_offset = match logo_blocks.iter().find(|block| !block.active) {
+        Some(block) => block.offset,
+        None => {
+            let mirror = if source.offset < region_size {
+                source.offset + region_size
+            } else {
+                source
+                    .offset
+                    .checked_sub(region_size)
+                    .context("computing the mirrored OEMINFO bank offset")?
+            };
+            ensure!(
+                mirror != source.offset,
+                "OEMINFO banks overlap; cannot compute a rotation slot for the boot logo"
+            );
+            ensure!(
+                is_aligned(mirror, OEMINFO_STANDARD_ALIGNMENT),
+                "mirrored boot logo slot 0x{mirror:X} is not 0x{:X}-aligned",
+                OEMINFO_STANDARD_ALIGNMENT
+            );
+            mirror
+        }
+    };
+
+    let target = target_offset as usize;
+    let write_end_payload = align_up(
+        target + OEMINFO_STANDARD_HEADER_SIZE + payload_len,
+        OEMINFO_STANDARD_ALIGNMENT,
+    );
+    let mut write_end = write_end_payload;
+    if let Some(previous) = image
+        .blocks
+        .iter()
+        .find(|block| block.offset == target_offset)
+    {
+        write_end = write_end.max(align_up(
+            target + previous.header_size + previous.length as usize,
+            OEMINFO_STANDARD_ALIGNMENT,
+        ));
+    }
+    let bank_end = if target < region_size {
+        region_size
+    } else {
+        region_size.saturating_mul(2).min(original.len())
+    };
+    let next_block = image
+        .blocks
+        .iter()
+        .filter(|block| block.offset > target)
+        .map(|block| block.offset)
+        .min()
+        .unwrap_or(usize::MAX);
+    let available_end = next_block.min(bank_end).min(original.len());
+    ensure!(
+        write_end <= available_end,
+        "replacement boot logo needs 0x{:X} bytes at 0x{target:X} but only 0x{:X} are free before the next block",
+        write_end - target,
+        available_end.saturating_sub(target)
+    );
+    for block in &image.blocks {
+        if block.offset == target {
+            continue;
+        }
+        let block_end = block.offset + block.header_size + block.length as usize;
+        ensure!(
+            block.offset >= write_end || block_end <= target,
+            "rotation slot 0x{target:X} overlaps OEMINFO block {}:{} at 0x{:X}",
+            block.id,
+            block.sub_id,
+            block.offset
+        );
+    }
+
+    let mut block_bytes = vec![0xff_u8; write_end - target];
+    block_bytes[0..8].copy_from_slice(OEMINFO_MAGIC);
+    block_bytes[8..12].copy_from_slice(&source.version.to_le_bytes());
+    block_bytes[12..16].copy_from_slice(&OEMINFO_BOOT_LOGO_ID.to_le_bytes());
+    block_bytes[16..20].copy_from_slice(&sub_id.to_le_bytes());
+    block_bytes[20..24].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    block_bytes[24..28].copy_from_slice(&new_age.to_le_bytes());
+    let payload_start = OEMINFO_STANDARD_HEADER_SIZE;
+    block_bytes[payload_start..payload_start + 4]
+        .copy_from_slice(&(IMAGE_DATA_OFFSET as u32).to_le_bytes());
+    block_bytes[payload_start + 4..payload_start + 8].copy_from_slice(&end_offset.to_le_bytes());
+    block_bytes[payload_start + 8..payload_start + 12]
+        .copy_from_slice(&random_adjust.to_le_bytes());
+    block_bytes[payload_start + 12..payload_start + 24].copy_from_slice(&image_version);
+    block_bytes[payload_start + 24..payload_start + IMAGE_DATA_OFFSET].fill(0);
+    block_bytes[payload_start + IMAGE_DATA_OFFSET..payload_start + payload_len]
+        .copy_from_slice(&payload_data);
+
+    let backup_path =
+        crate::fs_util::create_backup(path, &original, metadata.permissions(), "OEMINFO")
+            .with_context(|| format!("backing up OEMINFO image {}", path.display()))?;
+
+    let header_end = (target + OEMINFO_STANDARD_HEADER_SIZE) as u64;
+    let write_result = (|| -> Result<()> {
+        write_at(
+            &mut file,
+            header_end,
+            &block_bytes[OEMINFO_STANDARD_HEADER_SIZE..],
+        )?;
+        file.sync_all().with_context(|| {
+            format!(
+                "flushing replacement boot logo payload in {}",
+                path.display()
+            )
+        })?;
+        write_at(
+            &mut file,
+            target as u64,
+            &block_bytes[..OEMINFO_STANDARD_HEADER_SIZE],
+        )?;
+        file.sync_all().with_context(|| {
+            format!(
+                "committing replacement boot logo header in {}",
+                path.display()
+            )
+        })?;
+
+        let mut on_disk = vec![0_u8; block_bytes.len()];
+        read_at(&mut file, target as u64, &mut on_disk)?;
+        ensure!(
+            on_disk == block_bytes,
+            "replacement boot logo block failed write verification"
+        );
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let restore_end = write_end.min(original.len());
+        let _ = write_at(&mut file, target as u64, &original[target..restore_end]);
+        let _ = file.sync_all();
+        return Err(error);
+    }
+
+    let mut committed = vec![0_u8; original.len()];
+    read_at(&mut file, 0, &mut committed)?;
+    let reparsed = OemInfoImage::from_bytes(committed)?;
+    let active = reparsed
+        .blocks
+        .iter()
+        .find(|block| block.id == OEMINFO_BOOT_LOGO_ID && block.active)
+        .context("replacement boot logo block did not become the active generation")?;
+    ensure!(
+        active.offset == target && active.age == new_age,
+        "replacement boot logo verification mismatch at 0x{:X} (age {})",
+        active.offset,
+        active.age
+    );
+    let (active_width, active_height) = read_logo_dimensions(reparsed.as_bytes(), active)?;
+    ensure!(
+        (active_width, active_height) == (width, height),
+        "replacement boot logo changed pixel dimensions"
+    );
+
+    Ok(OemInfoBootLogoReplacement {
+        backup_path: backup_path.display().to_string(),
+        target_offset: target as u64,
+        age: new_age,
+        payload_bytes: payload_len as u64,
+        payload_kind: active.payload.kind,
+        width,
+        height,
+    })
+}
+
+fn write_at(file: &mut File, offset: u64, data: &[u8]) -> Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(data)?;
+    Ok(())
+}
+
+fn read_at(file: &mut File, offset: u64, data: &mut [u8]) -> Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(data)?;
+    Ok(())
 }
 
 fn validate_selected_block_header(header: &[u8], block: &OemInfoBlockSummary) -> Result<()> {

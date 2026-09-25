@@ -3,8 +3,7 @@ use crc32c::{crc32c as calculate_crc32c, crc32c_append};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 pub const NVE_BLOCK_SIZE: usize = 0x20_000;
 pub const NVE_PARTITION_COUNT: usize = 8;
@@ -541,7 +540,8 @@ pub fn edit_file_in_place(
         .with_context(|| format!("reading locked NVE image {}", path.display()))?;
     let mut image = NveImage::from_bytes(original.clone())?;
     let commit = image.write_entry(&key, &value)?;
-    let backup_path = create_backup(path, &original, metadata.permissions())?;
+    let backup_path = crate::fs_util::create_backup(path, &original, metadata.permissions(), "NVE")
+        .with_context(|| format!("backing up NVE image {}", path.display()))?;
     write_committed_block(&mut file, path, &image, &commit)?;
     Ok(NveEditResult {
         backup_path: backup_path.display().to_string(),
@@ -691,71 +691,6 @@ fn value_text(name: &str, value: &[u8]) -> String {
         String::from_utf8_lossy(trimmed).into_owned()
     } else {
         String::new()
-    }
-}
-
-fn create_backup(
-    path: &Path,
-    contents: &[u8],
-    source_permissions: fs::Permissions,
-) -> Result<PathBuf> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("NVE image path has no file name"))?
-        .to_string_lossy();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before UNIX epoch")?;
-    let mut suffix = 0_u32;
-    loop {
-        let suffix_text = if suffix == 0 {
-            String::new()
-        } else {
-            format!("-{suffix}")
-        };
-        let backup = parent.join(format!(
-            "{name}.bak_{}_{}{suffix_text}",
-            now.as_secs(),
-            now.subsec_nanos()
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut backup_file = match options.open(&backup) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                suffix = suffix
-                    .checked_add(1)
-                    .ok_or_else(|| anyhow::anyhow!("too many NVE backup name collisions"))?;
-                continue;
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "creating NVE backup {} from {}",
-                        backup.display(),
-                        path.display()
-                    )
-                });
-            }
-        };
-        let write_result = (|| -> Result<()> {
-            backup_file.write_all(contents)?;
-            fs::set_permissions(&backup, source_permissions.clone())?;
-            backup_file.sync_all()?;
-            Ok(())
-        })();
-        if let Err(error) = write_result {
-            drop(backup_file);
-            let _ = fs::remove_file(&backup);
-            return Err(error).with_context(|| format!("writing NVE backup {}", backup.display()));
-        }
-        return Ok(backup);
     }
 }
 
