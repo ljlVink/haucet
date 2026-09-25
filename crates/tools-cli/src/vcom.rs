@@ -28,30 +28,54 @@ pub fn flash(port: &str, address: u32, file: &Path) -> Result<()> {
     validate_loader(&data, file)?;
     let mut device = SerialVcomDevice::open(port, 115200)
         .with_context(|| format!("opening VCOM port {port}"))?;
-    let interactive = io::stdout().is_terminal();
-    let progress_active = Cell::new(false);
-    let mut log = |message: &str| {
-        if progress_active.replace(false) {
-            println!();
-        }
-        println!("* {message}");
-    };
-    let mut last_progress_bucket = 0;
+    let reporter = UploadReporter::new();
 
-    let result = vcom::upload(&mut device, &data, address, &mut log, &mut |sent, total| {
-        if interactive {
-            print_progress(sent, total);
-            progress_active.set(true);
-        } else if should_report_progress(sent, total, &mut last_progress_bucket) {
-            println!("  {sent}/{total} bytes");
-        }
-    });
-    if progress_active.replace(false) {
-        println!();
-    }
-    result?;
+    vcom::upload(
+        &mut device,
+        &data,
+        address,
+        &mut |message| reporter.log(message),
+        &mut |sent, total| reporter.progress(sent, total),
+    )?;
+    reporter.finish_line();
     println!("Flash finished.");
     Ok(())
+}
+
+struct UploadReporter {
+    interactive: bool,
+    progress_active: Cell<bool>,
+    last_bucket: Cell<u64>,
+}
+
+impl UploadReporter {
+    fn new() -> Self {
+        Self {
+            interactive: io::stdout().is_terminal(),
+            progress_active: Cell::new(false),
+            last_bucket: Cell::new(0),
+        }
+    }
+
+    fn log(&self, message: &str) {
+        self.finish_line();
+        println!("* {message}");
+    }
+
+    fn progress(&self, sent: u64, total: u64) {
+        if self.interactive {
+            print_progress(sent, total);
+            self.progress_active.set(true);
+        } else if should_report_progress(sent, total, &self.last_bucket) {
+            println!("  {sent}/{total} bytes");
+        }
+    }
+
+    fn finish_line(&self) {
+        if self.progress_active.replace(false) {
+            println!();
+        }
+    }
 }
 
 fn print_progress(sent: u64, total: u64) {
@@ -74,15 +98,15 @@ fn validate_loader(data: &[u8], file: &Path) -> Result<()> {
     Ok(())
 }
 
-fn should_report_progress(sent: u64, total: u64, last_bucket: &mut u64) -> bool {
+fn should_report_progress(sent: u64, total: u64, last_bucket: &Cell<u64>) -> bool {
     if total == 0 {
         return false;
     }
 
     let bucket = sent.min(total).saturating_mul(10) / total;
-    if bucket <= *last_bucket {
+    if bucket <= last_bucket.get() {
         return false;
     }
-    *last_bucket = bucket;
+    last_bucket.set(bucket);
     true
 }
