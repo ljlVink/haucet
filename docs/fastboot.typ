@@ -170,12 +170,13 @@
   [`FAIL`], [设备 → 主机], [失败, 后续 ASCII 文本是原因, 例如 `Not Ready`.],
 )
 
-#pagebreak()
 
 = ultraflash
 
 
 `ultraflash` 是私有流式刷写状态.它把目标分区选择、标准 `download` 数据传输和显式收尾组合为一次会话, 适用于 `system`、`vendor` 等大镜像.目标不支持时退回标准 Fastboot `download` + `flash`.
+
+固件的 ultraflash 会话不适用于 `oeminfo`, haucet 在协议层对该分区特判：不发送 `ultraflash:oeminfo`, 始终走标准 `download` + `flash` 路径.
 
 
 #table(
@@ -190,7 +191,6 @@
 
 在 USB 2.0 环境下, 大分区刷写通常可比普通路径快约 20%-30%.
 
-#pagebreak()
 
 = upload_storage
 
@@ -262,7 +262,6 @@ haucet fastboot analyse-storage   # 直接解析并打印分区表
 
 若解析器把逻辑块固定为 512 字节, 它会错误地到 `0x400` 查找分区项, 从而报告“不是 GPT”或得到空表.解析 GPT 头时可用 `header_offset / current_lba` 推断块大小； `haucet` 的 `analyse-storage` 与 `partition-info` 均按此逻辑自动识别.
 
-#pagebreak()
 
 = upload_memory
 
@@ -320,7 +319,45 @@ Using device PCIROOT(0)#PCI(1400)#USBROOT(0):13 ()
 Uploaded memory range 0x10900000:0x40000 to fastbootlog.bin (262144 bytes)
 ```
 
-#pagebreak()
+== BL33 运行时内存图
+
+#table(
+  columns: (1.55fr, 1.35fr, 2.7fr),
+  fill: (x, y) => if y == 0 { paper },
+  table.header([*范围*], [*内容*], [*说明*]),
+  [`0x3B400000–0x3B5FC000`], [BL33 FV1（解密后）], [FFS2 `_FVH`, `FvLength` 4 MiB; `+0x00` 零向量区被替换为 AArch64 分支（华为定制入口）.头部 ~1.9 MiB: PrePi/SEC 模块 XIP（LzmaCustomDecompressLib、PrePi.c 等）+ LZMA 压缩的 FVMAIN; 其余至 4 MiB 为 `0xFF` 填充.],
+  [`0x3B800000–0x3B840000`], [BL33 FV2], [FFS3 `_FVH`, `FvLength` 256 KiB.],
+  [`0x3B840000–0x3BA00000`], [窗口尾部], [1.75 MiB 无字符串二进制, 非 PE/TE 镜像.],
+  [`0x3BBE5000–0x3BD00000`], [*FastbootApp.efi 加载副本*], [`MZ` 头 + `.text` 与磁盘逐字节一致; 尺寸 `0x11B000`; 跨重启地址确定.旧资料“6 MiB dump 出模块树”对应的是非工厂 BL 状态, 工厂 BL 下本窗口为压缩态.],
+  [`0x3BCDE000–0x3BCFE000`], [FastbootApp `.data`], [命令/变量注册模板表、getvar 响应缓冲等],
+  [`0x3BA00000–0x3BE00000`], [DXE 堆（部分）], [`0x3BA00000–0x3BBE5000` 稀疏数据, 无其他 PE/TE 镜像.],
+  [`0x50431000+`], [伪页表], [`0xAFAFAFAF`],
+  [`0x50480000–0x507E0000`], [Runtime 驱动群], [ReportStatusCodeRouter / Capsule / Variable / Runtime / OpenPlatform 等已重定位的 EfiRuntime 镜像（MZ 页对齐）.],
+  [`0x47C00000–0x50800000`], [*DXE 世界（解压 FV + 驱动镜像群 + 池）*], [密度 60–100%.解压 DXE FV 约 `0x47C00000–0x4A400000`; 已加载 MZ 镜像群簇分三片: `0x48CBF000–0x48ED7000`（含两个含 `FastbootCtrl` 串的镜像）、`0x4B000000–0x4B800000`、`0x4E000000–0x4E800000`.另有多份 FastbootApp 族模块，散布 `0x48b2xxxx`/`0x48c4xxxx`/`0x4ed9xxxx`/`0x4f9exxxx`, 全部可写但均为惰性副本.],
+  [`0x50800000–0x8F000000`], [空 DRAM], [440 MiB 全量扫描无页表、无镜像, 仅零星稀疏数据.],
+  [`0x0A000000–0x0F800000`], [空 DRAM], [全零, 可读.],
+)
+
+PrePi 侧依据（`PeiUniCore.te` XIP, 均可从 `0x3B400000` 窗口直接读出）:
+
+- DDR 段表运行时全局 `@0x3B40E138`（计数 `@0x3B40E538`）: seg0 `0–0x50000000`, seg1 `0x50000000–0xE0000000`, seg2 `0x800000000–0x820000000`, seg3 `0x100000000–0x200000000`.
+- 分配器水位全局 `@0x3B40E140` 附近: 自由区 `[0x50000000, 0x90000000)`; 分配自顶向下; 上下文挂 `TPIDR_EL0`（`sub_3B4073E0` = AllocatePages, `sub_3B40B958` = 读 TPIDR）.
+- BL33 窗口 `0x3B400000+0x600000` 由 PrePi 从资源 HOB 中整段预留.
+
+== 保护情况
+
+#table(
+  columns: (1.5fr, 0.9fr, 3.05fr),
+  fill: (x, y) => if y == 0 { paper },
+  table.header([*目标*], [*结果*], [*证据/机制*]),
+  [RW DRAM / SRAM 写入], [#tag([成功], color: teal, background: teal-soft)], [`oem write 0x10CFC0@0x11451419`（SRAM, 回读一致）; `write__: 0.4` 4 × u32 写入 `.data` 响应缓冲 `0x3BCF2130`, 回读逐字节一致.],
+  [镜像 `.text` 写入], [#tag([崩溃])], [GCC/EDK2 把 rodata 并入 `.text`; DxeCore 镜像保护将该段映射 RO.写会导致整机重启.读不受影响.],
+  [改页表翻 AP 位], [#tag([不可行])], [真页表不在 NS 可见 DRAM（全量扫描证实, 见下行）; 且无 TLBI 原语 —— dTLB 旧 RO 表项不受描述符改写影响.],
+  [真页表定位], [#tag([NS 不可见])], [全量扫描 `0x0A000000–0x8F000000`（含 440 MiB 逐块）未发现任何真页表; 推测位于 TZ/HHEE 保护域.页表翻转路线在 NS fastboot 上下文内彻底不可行.],
+  [4 GB 以上], [#tag([NS 不可见])], [PrePi ctx 数学指向 `0x7F8000000+`; 实测首探即崩.],
+  [惰性字符串副本改写], [#tag([无效])], [],
+)
+
 
 = Fastboot OEM / Getvar 命令
 
@@ -350,7 +387,16 @@ OEM 扩展命令与 Getvar 变量.
   [`frp-unlock` / `frp-erase`], [#tag([?])], [涉及 FRP 状态修改.],
 )
 
-== 地址读写实测
+= oem read / write
+
+#table(
+  columns: (1.15fr, 1.85fr, 2.9fr),
+  fill: (x, y) => if y == 0 { paper },
+  table.header([*命令*], [*语法*], [*语义*]),
+  [`oem read`], [`read <addr>`], [裸读该地址 1 × u32, 无任何分类器/白名单.],
+  [`oem read` 批量], [`read <addr>@<size>`], [`@` 分隔地址与字节数.无 `@` 时 size 输出为 `-1` 并归零, 恰好 1 个 u32; 有 size 时每条 `INFO 0x%08x:` 行最多 4 个 `0x%08x`（16 字节）, 内层上限 `size <= 0 ? 1 : 4`, 地址递增 16, 取完回 `OKAY`.批量粒度 = 16 B/响应行.],
+  [`oem write`], [`write <addr>@<value>`], [地址 u64, 值 u32.解析成功即先回 `OKAY` 再执行裸 `*(u32*)addr = value`; 值为负（最高位）报 `FAILInput param error.`],
+)
 
 OEM `read` / `write` 完成“读取原值 → 写入测试值 → 再次读取”的验证.地址 `0x10CFC0` 初始返回 `0x00000000`, 写入后返回 `0x11451419`; 不仅写入命令显示完成, 后续读回值也与测试值一致.
 
@@ -417,8 +463,6 @@ ROOTMODE: NO
 
 `rootmode` 由 OEMINFO 中经过签名的证书材料验证, 因此常见返回为 `NO`.该结果反映认证状态, 不等同于 `FB LockState` 或 `USER LockState`.
 
-#pagebreak()
-
 = Getvar 扩展变量
 
 Getvar 是查询路径, 但个别 `rescue_*` 变量可能触发模式切换或重启.未知变量先按有副作用处理, 不应在生产设备上批量探测.
@@ -449,7 +493,6 @@ rescue_version: rescue0.9
   fill: (x, y) => if y == 0 { paper },
   table.header([*项目*], [*下一步*]),
   [`oeminforead-*`], [确认完整命令格式、允许的字段与返回编码.],
-  [`hwdog certify`], [补齐 `hm-fastboot` 支持后记录 begin / close 的完整响应.],
   [其他 OEM command], [从固件分发表建立命令清单, 再逐项标注前置条件与副作用.],
 )
 
