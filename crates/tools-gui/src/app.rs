@@ -893,6 +893,7 @@ fn result_owner(op: &JobOp, current: Page) -> ResultOwner {
         JobOp::FlashScriptValidate { .. } | JobOp::FlashScriptRun { .. } => {
             ResultOwner::Page(Page::Flash)
         }
+        JobOp::PartitionInfo { .. } => ResultOwner::Image(ImageKind::Partition),
         _ => ResultOwner::Page(current),
     }
 }
