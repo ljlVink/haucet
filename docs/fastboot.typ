@@ -178,6 +178,8 @@
 
 固件的 ultraflash 会话不适用于 `oeminfo`, haucet 在协议层对该分区特判：不发送 `ultraflash:oeminfo`, 始终走标准 `download` + `flash` 路径.
 
+`download` 的尺寸是 32 位值 (8 个十六进制字符), 超过 4 GiB 的镜像无法放入单个 ultraflash 会话, haucet 对这类镜像同样不发 `ultraflash`, 直接走标准路径: 按 `max-download-size` 把原始镜像拆成多个稀疏镜像分块刷写.
+
 
 #table(
   columns: (0.55fr, 2.2fr, 1.4fr),

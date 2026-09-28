@@ -637,8 +637,11 @@ impl NusbFastBoot {
         let file_len = file.metadata()?.len();
         // The bootloader's ultraflash session does not handle OEMINFO, so
         // never negotiate it for that partition and always take the standard
-        // download + flash path.
-        let use_ultraflash = !target.eq_ignore_ascii_case("oeminfo")
+        // download + flash path. The download size is a 32-bit protocol
+        // value, so images larger than 4 GiB must also use the standard
+        // path, which streams them as sequential sparse chunks.
+        let use_ultraflash = file_len <= u32::MAX as u64
+            && !target.eq_ignore_ascii_case("oeminfo")
             && match self.ultraflash(target).await {
                 Ok(()) => true,
                 Err(NusbFastBootError::FastbootFailed(_)) => false,
@@ -646,12 +649,16 @@ impl NusbFastBoot {
             };
         if use_ultraflash {
             progress(FlashEvent::Message("Using Ultraflash protocol"));
-            let file_size = u32::try_from(file_len).map_err(|_| FlashError::TooLarge(file_len))?;
-            let download_result = ultraflash_raw(self, file, file_size, progress).await;
+            let download_result = ultraflash_raw(self, file, file_len as u32, progress).await;
             let stop_result = self.ultraflash_stop().await;
             download_result?;
             stop_result?;
             return Ok(());
+        }
+        if file_len > u32::MAX as u64 {
+            progress(FlashEvent::Message(
+                "Image exceeds the 4 GiB download limit; using chunked sparse flashing",
+            ));
         }
         let max_download = self
             .get_var("max-download-size")
@@ -737,8 +744,6 @@ pub enum FlashError {
     Download(#[from] DownloadError),
     #[error("Fastboot transfer failed: {0}")]
     Fastboot(#[from] NusbFastBootError),
-    #[error("Image too large for ultraflash download: {0} bytes")]
-    TooLarge(u64),
 }
 
 async fn flash_raw(

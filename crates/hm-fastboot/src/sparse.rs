@@ -363,7 +363,7 @@ pub fn split_raw(raw_size: usize, size: u32) -> Result<Vec<Split>, SplitError> {
     while raw_blocks > block_offset {
         let mut builder = SplitBuilder::new(DEFAULT_BLOCKSIZE, size, block_offset);
         block_offset += builder.add_raw(
-            (block_offset * DEFAULT_BLOCKSIZE) as usize,
+            block_offset as usize * DEFAULT_BLOCKSIZE as usize,
             raw_blocks - block_offset,
         );
         splits.push(builder.finish());
