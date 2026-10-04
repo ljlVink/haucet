@@ -63,6 +63,9 @@ enum Command {
         /// Show a sanitized preview for text-like payloads
         #[arg(short, long)]
         preview: bool,
+        /// Export device certificates (active items 2601/2603) into DIR
+        #[arg(short, long, value_name = "DIR")]
+        certificates: Option<PathBuf>,
     },
     /// Operate on a device connected in fastboot mode
     #[command(arg_required_else_help = true)]
@@ -409,7 +412,17 @@ fn run_entropy_command(file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_oeminfo_command(image: PathBuf, preview: bool) -> Result<()> {
+fn run_oeminfo_command(image: PathBuf, preview: bool, certificates: Option<PathBuf>) -> Result<()> {
+    if let Some(directory) = certificates {
+        let certificates = oeminfo::export_device_certificates(&image, &directory)?;
+        for certificate in certificates {
+            println!(
+                "certificate ({}:{}): {} ({} bytes)",
+                certificate.id, certificate.sub_id, certificate.output, certificate.bytes
+            );
+        }
+        return Ok(());
+    }
     let summary = oeminfo::inspect(&image)?;
     println!("file: {}", image.display());
     println!(
@@ -652,7 +665,11 @@ fn main() {
         Command::Cpio { incpio, command } => run_cpio_command(&incpio, command),
         Command::PartitionInfo { image } => run_partition_info_command(image),
         Command::Entropy { file } => run_entropy_command(file),
-        Command::Oeminfo { image, preview } => run_oeminfo_command(image, preview),
+        Command::Oeminfo {
+            image,
+            preview,
+            certificates,
+        } => run_oeminfo_command(image, preview, certificates),
         Command::Fastboot { command } => run_fastboot_command(command),
         Command::Vcom { command } => run_vcom_command(command),
         Command::Ramdisk { command } => run_ramdisk_command(command),

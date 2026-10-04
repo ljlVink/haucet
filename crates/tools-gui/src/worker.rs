@@ -79,6 +79,10 @@ pub enum JobOp {
         block: oeminfo::OemInfoBlockSummary,
         output: String,
     },
+    OemInfoExportCertificates {
+        image: String,
+        output: String,
+    },
     OemInfoReplaceBootLogo {
         image: String,
         replacement: String,
@@ -383,6 +387,18 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
                 summary: tr!("worker-oeminfo-exported", "output" => output.clone()),
                 payload: None,
             })
+        }
+        JobOp::OemInfoExportCertificates { image, output } => {
+            let certificates =
+                oeminfo::export_device_certificates(Path::new(image), Path::new(output))?;
+            summary_payload(
+                tr!(
+                    "worker-oeminfo-certificates-exported",
+                    "count" => certificates.len(),
+                    "output" => output.clone()
+                ),
+                certificates,
+            )
         }
         JobOp::OemInfoReplaceBootLogo { image, replacement } => {
             let result = oeminfo::replace_boot_logo(Path::new(image), Path::new(replacement))?;

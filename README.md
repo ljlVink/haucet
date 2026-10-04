@@ -26,6 +26,7 @@ haucet partition-info rvt.img
 haucet partition-info ptable.img
 haucet oeminfo oeminfo.img
 haucet oeminfo oeminfo.img --preview
+haucet oeminfo oeminfo.img --certificates certs
 haucet cpio ramdisk.cpio ls --recursive /
 haucet fastboot devices
 haucet fastboot flash updater updater_vendor.img

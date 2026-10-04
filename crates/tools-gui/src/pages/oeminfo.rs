@@ -3,7 +3,8 @@ use crate::pages::Page;
 use crate::util::{human_size, open_in_file_manager, section};
 use anyhow::{Context, Result, ensure};
 use common::oeminfo::{
-    OEMINFO_BOOT_LOGO_ID, OemInfoBlockSummary, OemInfoImageSummary, OemInfoPayloadKind,
+    OEMINFO_BOOT_LOGO_ID, OEMINFO_DEVICE_CERTIFICATE_IDS, OemInfoBlockSummary, OemInfoImageSummary,
+    OemInfoPayloadKind,
 };
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -236,6 +237,7 @@ impl OemInfoPage {
             render_overview(ui, &common::oeminfo::overview(summary));
         }
 
+        self.render_certificate_export(ui, app);
         ui.add_space(12.0);
         self.render_filter(ui);
 
@@ -302,6 +304,39 @@ impl OemInfoPage {
                 self.filter.clear();
             }
         });
+    }
+
+    fn render_certificate_export(&mut self, ui: &mut egui::Ui, app: &mut HaucetApp) {
+        let certificates_present = self.summary.as_ref().is_some_and(|summary| {
+            summary
+                .blocks
+                .iter()
+                .any(|block| block.active && OEMINFO_DEVICE_CERTIFICATE_IDS.contains(&block.id))
+        });
+        if !certificates_present {
+            return;
+        }
+
+        let can_export = !app.job_running() && self.operation.is_none();
+        if ui
+            .add_enabled(
+                can_export,
+                egui::Button::new(tr!("export-device-certificates")),
+            )
+            .on_hover_text(tr!("export-device-certificates-hint"))
+            .clicked()
+            && let Some(directory) = app.pick_dir(&tr!("choose-certificate-export-dir"))
+        {
+            self.export_result = None;
+            let output = directory.display().to_string();
+            self.operation = Some(OemInfoOperation::Export {
+                output: output.clone(),
+            });
+            app.start_job(crate::worker::JobOp::OemInfoExportCertificates {
+                image: self.input.trim().to_owned(),
+                output,
+            });
+        }
     }
 
     pub(crate) fn poll_result(&mut self, app: &mut HaucetApp) {

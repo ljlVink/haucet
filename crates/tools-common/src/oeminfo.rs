@@ -18,6 +18,7 @@ pub const OEMINFO_REUSED_ALIGNMENT: usize = 0x80;
 pub const OEMINFO_MAX_EMBEDDED_IMAGE_SIZE: u64 = 256 * 1024 * 1024;
 pub const OEMINFO_MAX_AGE: u32 = 0x3B9AC9FF;
 pub const OEMINFO_BOOT_LOGO_ID: u32 = 4501;
+pub const OEMINFO_DEVICE_CERTIFICATE_IDS: &[u32] = &[2601, 2603];
 const IMAGE_END_ALIGNMENT: u32 = 16;
 const MAX_LOGO_SIDE: u32 = 8192;
 const MAX_LOGO_DECODE_ALLOCATION: u64 = 384 * 1024 * 1024;
@@ -30,6 +31,10 @@ const MAX_PLAUSIBLE_VERSION: u32 = 0x1_0000;
 const IMAGE_DATA_OFFSET: usize = 0x1a;
 const SIGNATURE_SIZE: usize = 256;
 const HIGH_ENTROPY_THRESHOLD: f64 = 7.5;
+/// Junk header the firmware writes in front of the certificate Base64 text.
+const DEVICE_CERTIFICATE_HEADER_CHARS: usize = 4;
+/// Base64 of the Java-serialization magic every certificate blob starts with.
+const DEVICE_CERTIFICATE_BASE64_PREFIX: &[u8] = b"rO0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -544,6 +549,93 @@ pub fn export_embedded_image(
         Ok(())
     })
     .with_context(|| format!("exporting embedded OEMINFO image to {}", output.display()))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OemInfoDeviceCertificate {
+    pub id: u32,
+    pub sub_id: u32,
+    pub bytes: usize,
+    pub output: String,
+}
+
+pub fn export_device_certificates(
+    source: &Path,
+    output_dir: &Path,
+) -> Result<Vec<OemInfoDeviceCertificate>> {
+    crate::fs_util::ensure_output_does_not_contain(source, output_dir)?;
+    let image = OemInfoImage::from_file(source)?;
+    let mut blocks = image
+        .blocks
+        .iter()
+        .filter(|block| block.active && OEMINFO_DEVICE_CERTIFICATE_IDS.contains(&block.id))
+        .collect::<Vec<_>>();
+    ensure!(
+        !blocks.is_empty(),
+        "no active device certificate blocks ({}) in {}",
+        OEMINFO_DEVICE_CERTIFICATE_IDS
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join("/"),
+        source.display()
+    );
+    blocks.sort_by_key(|block| (block.id, block.sub_id, block.offset));
+
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("creating directory {}", output_dir.display()))?;
+
+    let raw = image.as_bytes();
+    let mut certificates = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let payload = &raw[block.payload_range()];
+        let base64 = device_certificate_base64(payload, block)?;
+        let output = output_dir.join(format!("device_cert_{}-{}.b64", block.id, block.sub_id));
+        crate::fs_util::atomic_write(&output, "device-certificate", |writer| {
+            writer
+                .write_all(base64)
+                .with_context(|| format!("writing device certificate to {}", output.display()))?;
+            Ok(())
+        })?;
+        certificates.push(OemInfoDeviceCertificate {
+            id: block.id,
+            sub_id: block.sub_id,
+            bytes: base64.len(),
+            output: output.display().to_string(),
+        });
+    }
+    Ok(certificates)
+}
+
+fn device_certificate_base64<'a>(payload: &'a [u8], block: &ParsedBlock) -> Result<&'a [u8]> {
+    ensure!(
+        payload.len() > DEVICE_CERTIFICATE_HEADER_CHARS,
+        "device certificate block {}:{} at 0x{:X} is shorter than its {}-character header",
+        block.id,
+        block.sub_id,
+        block.offset,
+        DEVICE_CERTIFICATE_HEADER_CHARS
+    );
+    let base64 = &payload[DEVICE_CERTIFICATE_HEADER_CHARS..];
+    ensure!(
+        base64.starts_with(DEVICE_CERTIFICATE_BASE64_PREFIX),
+        "device certificate block {}:{} at 0x{:X} does not carry Base64 certificate text",
+        block.id,
+        block.sub_id,
+        block.offset
+    );
+    let end = base64
+        .iter()
+        .rposition(|byte| is_base64_byte(*byte))
+        .map_or(0, |index| index + 1);
+    Ok(&base64[..end])
+}
+
+fn is_base64_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'='
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
