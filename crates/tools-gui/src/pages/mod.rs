@@ -50,7 +50,7 @@ impl Page {
         match self {
             Self::Home => None,
             Self::Package => Some((tr!("page-package-title"), tr!("page-package-description"))),
-            Self::Online => Some((tr!("page-online-title"), "VERSION.mbn".to_owned())),
+            Self::Online => Some((tr!("page-online-title"), tr!("online-description"))),
             Self::Images => Some((tr!("page-images-title"), tr!("page-images-description"))),
             Self::Fastboot => Some((tr!("page-fastboot-title"), tr!("page-fastboot-description"))),
             Self::Flash => Some((tr!("page-flash-title"), tr!("page-flash-description"))),

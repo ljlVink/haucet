@@ -850,6 +850,8 @@ fn job_label(op: &JobOp) -> String {
         OemInfoExportCertificates { .. } => tr!("job-oeminfo-export-certificates"),
         PackageInspect { .. } => tr!("job-package-inspect"),
         OnlineFetch { .. } => tr!("online-fetch"),
+        OnlineList { .. } => tr!("online-search"),
+        OnlineSubmit { .. } => tr!("online-submit"),
         PackageUnpack { .. } => tr!("job-package-unpack"),
         ErofsUnpack { .. } => tr!("job-erofs-unpack"),
         ErofsRepack { .. } => tr!("job-erofs-repack"),
@@ -876,7 +878,9 @@ fn job_label(op: &JobOp) -> String {
 
 fn result_owner(op: &JobOp, current: Page) -> ResultOwner {
     match op {
-        JobOp::OnlineFetch { .. } => ResultOwner::Page(Page::Online),
+        JobOp::OnlineFetch { .. } | JobOp::OnlineList { .. } | JobOp::OnlineSubmit { .. } => {
+            ResultOwner::Page(Page::Online)
+        }
         JobOp::PackageInspect { .. } | JobOp::PackageUnpack { .. } => {
             ResultOwner::Page(Page::Package)
         }

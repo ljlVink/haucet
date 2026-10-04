@@ -20,6 +20,12 @@ pub enum JobOp {
     OnlineFetch {
         url: String,
     },
+    OnlineList {
+        query: online_fetcher::api::RequestsQuery,
+    },
+    OnlineSubmit {
+        request: online_fetcher::api::NewFirmwareRequest,
+    },
     PackageInspect {
         input: String,
         layout: UpdateLayout,
@@ -182,6 +188,16 @@ fn execute(op: &JobOp) -> Result<WorkerResult> {
                 tr!("online-fetched", "bytes" => info.downloaded_bytes, "requests" => info.range_requests),
                 info,
             )
+        }
+        JobOp::OnlineList { query } => {
+            let client = online_fetcher::api::FirmwareClient::new()?;
+            let result = client.list_requests(query)?;
+            summary_payload(tr!("online-list-loaded", "total" => result.total), result)
+        }
+        JobOp::OnlineSubmit { request } => {
+            let client = online_fetcher::api::FirmwareClient::new()?;
+            let created = client.submit_request(request)?;
+            summary_payload(tr!("online-submit-created", "id" => created.id), created)
         }
         JobOp::PackageInspect { input, layout } => {
             let index = package::inspect(Path::new(input), *layout)?;

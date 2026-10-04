@@ -3,10 +3,14 @@ name = "online-fetcher"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Read VERSION.mbn from remote ZIP archives using HTTP byte ranges"
+description = "Query and submit firmware records, and read VERSION.mbn from remote ZIP archives"
 
 [dependencies]
 anyhow.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+flate2.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde.workspace = true
 zip.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

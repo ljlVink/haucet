@@ -1,3 +1,5 @@
+pub mod api;
+
 mod remote;
 
 use anyhow::{Context, Result, ensure};
