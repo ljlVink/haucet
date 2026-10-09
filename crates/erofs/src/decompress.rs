@@ -1,3 +1,5 @@
+use std::ffi::c_char;
+
 use crate::erofs_fs::*;
 use crate::error::{Error, Result};
 use crate::sb::SbInfo;
@@ -41,12 +43,10 @@ fn do_lz4(
     decodedlength: u64,
     partial: bool,
 ) -> Result<usize> {
-    // lz4-sys 1.11 does not export this symbol in its bindings, but the
-    // bundled liblz4 provides it and is linked statically.
     unsafe extern "C" {
         fn LZ4_decompress_safe_partial(
-            source: *const i8,
-            dest: *mut i8,
+            source: *const c_char,
+            dest: *mut c_char,
             sourceSize: i32,
             targetOutputSize: i32,
             maxOutputSize: i32,
@@ -60,16 +60,16 @@ fn do_lz4(
     let ret = unsafe {
         if partial {
             LZ4_decompress_safe_partial(
-                src[inputmargin..].as_ptr() as *const i8,
-                dst.as_mut_ptr() as *mut i8,
+                src[inputmargin..].as_ptr().cast::<c_char>(),
+                dst.as_mut_ptr().cast::<c_char>(),
                 inlen,
                 outlen,
                 outlen,
             )
         } else {
             lz4_sys::LZ4_decompress_safe(
-                src[inputmargin..].as_ptr() as *const i8,
-                dst.as_mut_ptr() as *mut i8,
+                src[inputmargin..].as_ptr().cast::<c_char>(),
+                dst.as_mut_ptr().cast::<c_char>(),
                 inlen,
                 outlen,
             )

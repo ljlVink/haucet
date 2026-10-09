@@ -161,12 +161,12 @@ pub(crate) fn format_local_time(timestamp: i64) -> String {
         if libc::localtime_r(&value, &mut tm).is_null() {
             return String::new();
         }
-        let mut buffer = [0i8; 128];
+        let mut buffer = [0 as libc::c_char; 128];
         let format = b"%a %b %e %H:%M:%S %Y\0";
         libc::strftime(
             buffer.as_mut_ptr(),
             buffer.len(),
-            format.as_ptr() as *const i8,
+            format.as_ptr().cast::<libc::c_char>(),
             &tm,
         );
         CStr::from_ptr(buffer.as_ptr())
