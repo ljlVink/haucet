@@ -668,6 +668,7 @@ dependencies = [
  "flash-script",
  "hisi-vcom",
  "hm-fastboot",
+ "online-fetcher",
  "tokio",
  "winresource",
 ]

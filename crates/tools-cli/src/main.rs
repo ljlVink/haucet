@@ -7,6 +7,7 @@ use common::{
     formats::{erofs, ext4},
     fs_util, oeminfo, package, ramdisk,
 };
+use online_fetcher::api::{FirmwareAction, FirmwareClient, RequestsQuery};
 use std::path::{Path, PathBuf};
 
 mod fastboot;
@@ -90,6 +91,12 @@ enum Command {
     Ramdisk {
         #[command(subcommand)]
         command: RamdiskCommand,
+    },
+    /// Query the online firmware catalog
+    #[command(arg_required_else_help = true)]
+    Online {
+        #[command(subcommand)]
+        command: OnlineCommand,
     },
 }
 
@@ -181,6 +188,37 @@ enum VcomCommand {
 enum FlashScriptCommand {
     /// Run a flash script
     Run { script: PathBuf },
+}
+
+#[derive(Debug, Subcommand)]
+enum OnlineCommand {
+    /// Search firmware records by keyword, e.g. a product code like `WEB`
+    #[command(arg_required_else_help = true)]
+    Search {
+        /// Keyword matched against device codes, names, and versions
+        keyword: String,
+        /// Only return records with this action
+        #[arg(short, long)]
+        action: Option<OnlineAction>,
+        /// Result page number, 1-based
+        #[arg(long)]
+        page: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum OnlineAction {
+    Upgrade,
+    Recovery,
+}
+
+impl From<OnlineAction> for online_fetcher::api::FirmwareAction {
+    fn from(value: OnlineAction) -> Self {
+        match value {
+            OnlineAction::Upgrade => Self::Upgrade,
+            OnlineAction::Recovery => Self::Recovery,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -657,6 +695,52 @@ fn run_ramdisk_command(command: RamdiskCommand) -> Result<()> {
     }
 }
 
+fn run_online_command(command: OnlineCommand) -> Result<()> {
+    let OnlineCommand::Search {
+        keyword,
+        action,
+        page,
+    } = command;
+    let query = RequestsQuery {
+        q: Some(keyword),
+        action: action.map(FirmwareAction::from),
+        page,
+    };
+    let client = FirmwareClient::new()?;
+    let catalog = client.list_requests(&query)?;
+    let pages = if catalog.per_page == 0 {
+        1
+    } else {
+        catalog.total.div_ceil(catalog.per_page).max(1)
+    };
+    println!(
+        "matched {} record(s), page {} of {}",
+        catalog.total, catalog.page, pages
+    );
+    if catalog.requests.is_empty() {
+        return Ok(());
+    }
+    for record in &catalog.requests {
+        println!();
+        println!("dev: {}", record.dev);
+        println!("device: {}", record.device_name.as_deref().unwrap_or("-"));
+        println!("vendor: {}", record.vendor);
+        let action = match record.upgrade_or_erec {
+            FirmwareAction::Upgrade => "upgrade",
+            FirmwareAction::Recovery => "recovery",
+        };
+        println!("action: {action}");
+        println!("target version: {}", record.target_bl_version_number);
+        println!("created: {}", record.created_at);
+        println!("packages ({}):", record.packages.len());
+        for (index, package) in record.packages.iter().enumerate() {
+            println!("  {}. {}", index + 1, package.version_number);
+            println!("     {}", package.url);
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     let result = match Cli::parse().command {
         Command::Unpack(args) => run_unpack_command(args),
@@ -674,6 +758,7 @@ fn main() {
         Command::Vcom { command } => run_vcom_command(command),
         Command::Ramdisk { command } => run_ramdisk_command(command),
         Command::FlashScript { command } => run_flash_script_command(command),
+        Command::Online { command } => run_online_command(command),
     };
 
     if let Err(error) = result {

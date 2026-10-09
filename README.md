@@ -37,6 +37,7 @@ haucet fastboot reboot
 haucet fastboot oem device-info
 haucet vcom devices
 haucet vcom flash COM3 0x80000000 loader.bin
+haucet online search WEB-W00
 ```
 
 ## Build

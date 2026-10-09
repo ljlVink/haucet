@@ -16,6 +16,7 @@ common = { path = "../tools-common" }
 hm-fastboot = { path = "../hm-fastboot" }
 hisi-vcom = { path = "../hisi-vcom" }
 flash-script = { path = "../flash-script" }
+online-fetcher = { path = "../online-fetcher" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [build-dependencies]
